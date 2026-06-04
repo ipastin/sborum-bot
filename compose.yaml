@@ -1,0 +1,16 @@
+services:
+  sborum-bot:
+    build:
+      context: .
+    container_name: sborum-bot
+    restart: unless-stopped
+    init: true
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
