@@ -1,0 +1,6 @@
+.env
+data/state.json
+data/*.tmp
+backups/
+node_modules/
+.DS_Store
