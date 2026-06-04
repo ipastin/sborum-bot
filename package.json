@@ -1,0 +1,15 @@
+{
+  "name": "sborum-bot",
+  "version": "2.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Telegram bot for collecting quorum for one-time and recurring events.",
+  "scripts": {
+    "start": "node src/index.js",
+    "check": "node --check src/index.js && node --check src/schedule.js && node --check src/events.js && node --check src/store.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
