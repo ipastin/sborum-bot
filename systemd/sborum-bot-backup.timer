@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily backup timer for sborum-bot
+
+[Timer]
+OnCalendar=*-*-* 03:27:00
+Persistent=true
+RandomizedDelaySec=15m
+Unit=sborum-bot-backup.service
+
+[Install]
+WantedBy=timers.target
