@@ -40,6 +40,7 @@ install -d -o root -g "${APP_USER}" -m 0750 "/etc/${APP}"
 install -d -o "${APP_USER}" -g "${APP_USER}" -m 0700 "/var/lib/${APP}" "/var/backups/${APP}"
 
 echo "==> Copying application files"
+install -o root -g root -m 0644 "${ROOT}/package.json" "/opt/${APP}/package.json"
 install -o root -g root -m 0644 "${ROOT}"/src/*.js "/opt/${APP}/src/"
 install -o root -g root -m 0755 "${ROOT}/scripts/backup-state.sh" "/opt/${APP}/scripts/backup-state.sh"
 install -o root -g root -m 0755 "${ROOT}/scripts/diagnose-systemd.sh" "/opt/${APP}/scripts/diagnose-systemd.sh"
