@@ -158,6 +158,10 @@ export async function updateEventFields(db, id, patch) {
     values.push(key === "active" ? boolInt(value) : value);
   }
 
+  if (assignments.length === 0) {
+    return;
+  }
+
   values.push(id);
   await db
     .prepare(`UPDATE events SET ${assignments.join(", ")} WHERE id = ?`)

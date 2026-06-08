@@ -1,7 +1,6 @@
 # Развёртывание на Cloudflare Workers
 
-Пошаговый рунбук переезда с VPS. Команды можно копировать как есть.
-Подробное объяснение «зачем» — в плане `~/.claude/plans/sharded-stirring-turing.md`.
+Пошаговый рунбук переезда с VPS на Cloudflare Workers. Команды можно копировать как есть.
 
 ## 0. Что нужно один раз
 - Аккаунт Cloudflare (бесплатный план): https://dash.cloudflare.com/sign-up

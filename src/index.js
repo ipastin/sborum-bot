@@ -63,6 +63,10 @@ function buildConfig(env) {
 }
 
 function createApp(env) {
+  if (!env.DB) {
+    throw new Error("Missing D1 binding (env.DB).");
+  }
+
   return { db: env.DB, config: buildConfig(env) };
 }
 
@@ -872,7 +876,7 @@ async function handleCallback(app, query) {
   const eventId = parts[2];
   const event = await getEvent(app.db, eventId);
 
-  if (!event) {
+  if (!event || String(event.chatId) !== String(message.chat.id)) {
     return answerCallback(
       app,
       query.id,

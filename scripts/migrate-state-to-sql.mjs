@@ -97,16 +97,15 @@ for (const poll of Object.values(polls)) {
 
 for (const [key, value] of Object.entries(publishedEvents)) {
   const separator = key.indexOf(":");
-  if (separator === -1) continue;
+  if (separator <= 0 || separator >= key.length - 1) continue;
+
+  const eventId = key.slice(0, separator);
+  const eventDate = key.slice(separator + 1);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(eventDate)) continue;
 
   lines.push(
     "INSERT OR IGNORE INTO published_events (event_id, event_date, poll_id, published_at) VALUES " +
-      row([
-        key.slice(0, separator),
-        key.slice(separator + 1),
-        value.pollId,
-        value.publishedAt,
-      ]) +
+      row([eventId, eventDate, value.pollId, value.publishedAt]) +
       ";",
   );
 }
