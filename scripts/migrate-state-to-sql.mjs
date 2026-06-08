@@ -97,6 +97,7 @@ for (const poll of Object.values(polls)) {
 
 for (const [key, value] of Object.entries(publishedEvents)) {
   const separator = key.indexOf(":");
+  if (separator === -1) continue;
 
   lines.push(
     "INSERT OR IGNORE INTO published_events (event_id, event_date, poll_id, published_at) VALUES " +

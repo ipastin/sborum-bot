@@ -56,22 +56,28 @@ function rowToPoll(row, selections) {
 async function hydratePolls(db, rows) {
   if (rows.length === 0) return [];
 
-  const placeholders = rows.map(() => "?").join(",");
-  const { results } = await db
-    .prepare(
-      `SELECT poll_id, user_id, option_id, display_name, updated_at
-       FROM poll_votes WHERE poll_id IN (${placeholders})`,
-    )
-    .bind(...rows.map((row) => row.poll_id))
-    .all();
-
+  // D1 allows at most 100 bound parameters per query, so fetch votes in
+  // chunks of 100 poll ids and merge the results.
   const byPoll = {};
-  for (const vote of results) {
-    (byPoll[vote.poll_id] ||= {})[vote.user_id] = {
-      optionId: vote.option_id,
-      displayName: vote.display_name,
-      updatedAt: vote.updated_at,
-    };
+
+  for (let i = 0; i < rows.length; i += 100) {
+    const chunk = rows.slice(i, i + 100);
+    const placeholders = chunk.map(() => "?").join(",");
+    const { results } = await db
+      .prepare(
+        `SELECT poll_id, user_id, option_id, display_name, updated_at
+         FROM poll_votes WHERE poll_id IN (${placeholders})`,
+      )
+      .bind(...chunk.map((row) => row.poll_id))
+      .all();
+
+    for (const vote of results) {
+      (byPoll[vote.poll_id] ||= {})[vote.user_id] = {
+        optionId: vote.option_id,
+        displayName: vote.display_name,
+        updatedAt: vote.updated_at,
+      };
+    }
   }
 
   return rows.map((row) => rowToPoll(row, byPoll[row.poll_id] || {}));
