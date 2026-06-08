@@ -43,7 +43,7 @@ import {
 } from "./store.js";
 
 const APP_NAME = "sborum-bot";
-const APP_VERSION = "3.0.2";
+const APP_VERSION = "3.0.3";
 
 const SESSION_TTL_MS = 24 * 3_600_000;
 
@@ -354,13 +354,13 @@ function promptFor(field, eventType) {
   return prompts[field];
 }
 
-// Build a force-reply prompt for a wizard step that also works in groups.
-// A `selective` force-reply only targets @username mentions / reply-targets —
-// NOT a text_mention by id — so it silently fails in groups. We use a plain
-// force-reply (switches the member's input to "reply to the bot", so the answer
-// reaches the bot even under group privacy mode) and prepend a mention of the
-// asked user so it is clear who should answer.
-function mentionedForceReply(user, body, placeholder) {
+// Build a wizard prompt that mentions the asked user. Telegram force-reply is
+// unreliable in groups (it does not auto-engage across clients, and `selective`
+// only targets @username mentions, not text_mention by id), so we do not rely
+// on it. Instead the bot reads the user's next plain message (see
+// handleSessionMessage) — which requires the bot's group privacy mode to be
+// OFF. The mention makes it clear whose turn it is and pings them.
+function mentionPrompt(user, body) {
   const name = (user?.first_name || "Участник").trim() || "Участник";
 
   return {
@@ -369,20 +369,12 @@ function mentionedForceReply(user, body, placeholder) {
       entities: [
         { type: "text_mention", offset: 0, length: name.length, user: { id: user.id } },
       ],
-      reply_markup: {
-        force_reply: true,
-        input_field_placeholder: placeholder,
-      },
     },
   };
 }
 
 async function ask(app, session, field, chatId, threadId, user) {
-  const { text, extra } = mentionedForceReply(
-    user,
-    promptFor(field, session.eventType),
-    "Ответь на это сообщение",
-  );
+  const { text, extra } = mentionPrompt(user, promptFor(field, session.eventType));
 
   const message = await send(app, chatId, text, {
     ...topicPayload(threadId),
@@ -468,12 +460,19 @@ async function handleSessionMessage(app, message) {
 
   if (!session) return false;
 
-  if (message.reply_to_message?.message_id !== session.promptMessageId) {
+  const text = message.text;
+
+  // A reply is NOT required: Telegram force-reply is unreliable in groups, so we
+  // treat this user's next message as the wizard answer (matched by the session
+  // key = chatId:userId). The bot's group privacy mode must be OFF for plain
+  // group answers to arrive. Commands fall through to the command handler, and
+  // non-text messages are ignored.
+  if (!text || text.trim().startsWith("/")) {
     return false;
   }
 
   try {
-    const parsed = parseEventField(session.field, message.text);
+    const parsed = parseEventField(session.field, text);
 
     if (session.mode === "edit") {
       const event = await getEvent(app.db, session.eventId);
@@ -581,10 +580,9 @@ async function handleSessionMessage(app, message) {
 
     return true;
   } catch (error) {
-    const { text, extra } = mentionedForceReply(
+    const { text, extra } = mentionPrompt(
       message.from,
       `Не удалось сохранить: ${error.message}\n\nПопробуй ещё раз или отправь /cancel.`,
-      "Исправь значение",
     );
 
     const retryMessage = await send(app, message.chat.id, text, {
