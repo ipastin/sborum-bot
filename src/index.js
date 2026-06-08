@@ -43,7 +43,7 @@ import {
 } from "./store.js";
 
 const APP_NAME = "sborum-bot";
-const APP_VERSION = "3.0.0";
+const APP_VERSION = "3.0.2";
 
 const SESSION_TTL_MS = 24 * 3_600_000;
 
@@ -354,14 +354,39 @@ function promptFor(field, eventType) {
   return prompts[field];
 }
 
-async function ask(app, session, field, chatId, threadId) {
-  const message = await send(app, chatId, promptFor(field, session.eventType), {
-    ...topicPayload(threadId),
-    reply_markup: {
-      force_reply: true,
-      selective: true,
-      input_field_placeholder: "Ответь на это сообщение",
+// Build a force-reply prompt for a wizard step that also works in groups.
+// A `selective` force-reply only targets @username mentions / reply-targets —
+// NOT a text_mention by id — so it silently fails in groups. We use a plain
+// force-reply (switches the member's input to "reply to the bot", so the answer
+// reaches the bot even under group privacy mode) and prepend a mention of the
+// asked user so it is clear who should answer.
+function mentionedForceReply(user, body, placeholder) {
+  const name = (user?.first_name || "Участник").trim() || "Участник";
+
+  return {
+    text: `${name}, ${body}`,
+    extra: {
+      entities: [
+        { type: "text_mention", offset: 0, length: name.length, user: { id: user.id } },
+      ],
+      reply_markup: {
+        force_reply: true,
+        input_field_placeholder: placeholder,
+      },
     },
+  };
+}
+
+async function ask(app, session, field, chatId, threadId, user) {
+  const { text, extra } = mentionedForceReply(
+    user,
+    promptFor(field, session.eventType),
+    "Ответь на это сообщение",
+  );
+
+  const message = await send(app, chatId, text, {
+    ...topicPayload(threadId),
+    ...extra,
   });
 
   session.field = field;
@@ -387,41 +412,41 @@ async function askEventType(app, message) {
   );
 }
 
-async function startCreate(app, message, eventType, userId = message.from.id) {
+async function startCreate(app, message, eventType, user) {
   const fields = fieldsForEventType(eventType);
 
   const session = {
     mode: "create",
     eventType,
     fields,
-    userId,
+    userId: user.id,
     chatId: String(message.chat.id),
     threadId: message.message_thread_id || null,
     values: {},
     index: 0,
   };
 
-  await ask(app, session, fields[0], message.chat.id, session.threadId);
+  await ask(app, session, fields[0], message.chat.id, session.threadId, user);
 }
 
-async function startEdit(app, message, event, field, userId) {
+async function startEdit(app, message, event, field, user) {
   const session = {
     mode: "edit",
     eventType: event.type,
-    userId,
+    userId: user.id,
     chatId: String(message.chat.id),
     threadId: message.message_thread_id || null,
     eventId: event.id,
   };
 
-  await ask(app, session, field, message.chat.id, session.threadId);
+  await ask(app, session, field, message.chat.id, session.threadId, user);
 }
 
-async function startChangeTypeToRecurring(app, message, event, userId) {
+async function startChangeTypeToRecurring(app, message, event, user) {
   const session = {
     mode: "change_type_to_recurring",
     eventType: EVENT_TYPES.RECURRING,
-    userId,
+    userId: user.id,
     chatId: String(message.chat.id),
     threadId: message.message_thread_id || null,
     eventId: event.id,
@@ -433,6 +458,7 @@ async function startChangeTypeToRecurring(app, message, event, userId) {
     "intervalDays",
     message.chat.id,
     session.threadId,
+    user,
   );
 }
 
@@ -525,6 +551,7 @@ async function handleSessionMessage(app, message) {
         session.fields[session.index],
         message.chat.id,
         session.threadId,
+        message.from,
       );
 
       return true;
@@ -554,19 +581,16 @@ async function handleSessionMessage(app, message) {
 
     return true;
   } catch (error) {
-    const retryMessage = await send(
-      app,
-      message.chat.id,
+    const { text, extra } = mentionedForceReply(
+      message.from,
       `Не удалось сохранить: ${error.message}\n\nПопробуй ещё раз или отправь /cancel.`,
-      {
-        ...topicPayload(message.message_thread_id),
-        reply_markup: {
-          force_reply: true,
-          selective: true,
-          input_field_placeholder: "Исправь значение",
-        },
-      },
+      "Исправь значение",
     );
+
+    const retryMessage = await send(app, message.chat.id, text, {
+      ...topicPayload(message.message_thread_id),
+      ...extra,
+    });
 
     session.promptMessageId = retryMessage.message_id;
     await setSession(app.db, key, session);
@@ -843,7 +867,7 @@ async function handleCallback(app, query) {
     const eventType = data.split(":")[2];
 
     await answerCallback(app, query.id);
-    return startCreate(app, message, eventType, user.id);
+    return startCreate(app, message, eventType, user);
   }
 
   const parts = data.split(":");
@@ -875,7 +899,7 @@ async function handleCallback(app, query) {
 
   if (data.startsWith("ev:edit:")) {
     await answerCallback(app, query.id);
-    return startEdit(app, message, event, parts[3], user.id);
+    return startEdit(app, message, event, parts[3], user);
   }
 
   if (data.startsWith("ev:typeask:")) {
@@ -927,7 +951,7 @@ async function handleCallback(app, query) {
         app,
         message,
         event,
-        user.id,
+        user,
       );
     }
 
