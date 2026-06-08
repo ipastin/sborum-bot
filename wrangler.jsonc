@@ -1,0 +1,34 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "sborum-bot",
+  "main": "src/index.js",
+  "compatibility_date": "2025-01-01",
+
+  // The bot uses only Web-standard APIs (fetch, Web Crypto, Intl) after the D1
+  // rewrite, so no node:* polyfills / compatibility_flags are required.
+
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "sborum-bot",
+      "database_id": "8286fb41-6dae-425d-8da6-f0cd0313c953",
+      "migrations_dir": "migrations"
+    }
+  ],
+
+  // Run the scheduler once per minute.
+  "triggers": {
+    "crons": ["* * * * *"]
+  },
+
+  // Non-secret configuration. Secrets (BOT_TOKEN, TELEGRAM_WEBHOOK_SECRET) are
+  // set with `wrangler secret put ...` and never committed.
+  "vars": {
+    "TIMEZONE": "Europe/Moscow",
+    "OWNER_USER_ID": "2881434"
+  },
+
+  "observability": {
+    "enabled": true
+  }
+}

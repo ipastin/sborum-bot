@@ -58,3 +58,59 @@ test("recurring event keeps publishing every interval", () => {
     alreadyPublishedEventDates: ["2026-06-11"],
   }), "2026-06-25");
 });
+
+test("does not publish before the publish time", () => {
+  assert.equal(getScheduledEventDate({
+    eventType: EVENT_TYPES.ONE_TIME,
+    today: "2026-06-16",
+    currentHour: 11,
+    currentMinute: 59,
+    publishHour: 12,
+    publishMinute: 0,
+    eventStartDate: "2026-06-18",
+    publishDaysBefore: 2,
+  }), null);
+});
+
+test("a late tick after the publish time still publishes (catch-up)", () => {
+  const lateTick = {
+    eventType: EVENT_TYPES.ONE_TIME,
+    today: "2026-06-16",
+    currentHour: 12,
+    currentMinute: 5,
+    publishHour: 12,
+    publishMinute: 0,
+    eventStartDate: "2026-06-18",
+    publishDaysBefore: 2,
+  };
+
+  assert.equal(getScheduledEventDate(lateTick), "2026-06-18");
+  assert.equal(
+    getScheduledEventDate({ ...lateTick, alreadyPublishedEventDates: ["2026-06-18"] }),
+    null,
+  );
+});
+
+test("a late tick publishes the recurring occurrence and dedups", () => {
+  const lateTick = {
+    eventType: EVENT_TYPES.RECURRING,
+    today: "2026-06-23",
+    currentHour: 12,
+    currentMinute: 30,
+    publishHour: 12,
+    publishMinute: 0,
+    eventStartDate: "2026-06-11",
+    intervalDays: 14,
+    publishDaysBefore: 2,
+    alreadyPublishedEventDates: ["2026-06-11"],
+  };
+
+  assert.equal(getScheduledEventDate(lateTick), "2026-06-25");
+  assert.equal(
+    getScheduledEventDate({
+      ...lateTick,
+      alreadyPublishedEventDates: ["2026-06-11", "2026-06-25"],
+    }),
+    null,
+  );
+});

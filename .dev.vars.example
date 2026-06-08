@@ -1,0 +1,4 @@
+# Local-only secrets for `wrangler dev`. Copy to `.dev.vars` (git-ignored).
+# In production these are set with `wrangler secret put ...` instead.
+BOT_TOKEN="123456:test-bot-token-from-botfather"
+TELEGRAM_WEBHOOK_SECRET="any-long-random-string"

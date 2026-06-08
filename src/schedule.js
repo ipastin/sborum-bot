@@ -152,7 +152,13 @@ export function getScheduledEventDate({
   publishDaysBefore,
   alreadyPublishedEventDates = [],
 }) {
-  if (currentHour !== publishHour || currentMinute !== publishMinute) {
+  // Publish once today's publish time has been reached (not only at the exact
+  // minute). A once-per-minute cron is best-effort and may fire late or be
+  // skipped; this threshold lets a late tick still catch up, while the
+  // alreadyPublishedEventDates guards below prevent re-publishing.
+  const nowMinutes = currentHour * 60 + currentMinute;
+  const publishMinutes = publishHour * 60 + publishMinute;
+  if (nowMinutes < publishMinutes) {
     return null;
   }
 

@@ -1,4 +1,3 @@
-import crypto from "node:crypto";
 import {
   assertDateOnly,
   EVENT_TYPES,
@@ -14,7 +13,9 @@ const COMMON_FIELDS_AFTER_DATE = [
 ];
 
 export function newEventId() {
-  return crypto.randomBytes(4).toString("hex");
+  // Web Crypto global: available in Cloudflare Workers and Node 20+.
+  const bytes = crypto.getRandomValues(new Uint8Array(4));
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 export function assertEventType(value) {
