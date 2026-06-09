@@ -26,6 +26,22 @@ export function assertDateOnly(value, name = "Дата") {
   return value;
 }
 
+// User-facing date input: accepts DD.MM.YYYY and DD.MM.YY (2-digit year → 20YY),
+// with lenient 1–2 digit day/month. Returns the canonical YYYY-MM-DD used for
+// storage and date math; assertDateOnly rejects impossible dates (e.g. 30.02).
+export function parseDateInput(value, name = "Дата") {
+  const match = /^(\d{1,2})\.(\d{1,2})\.(\d{2}|\d{4})$/.exec(String(value ?? "").trim());
+  if (!match) {
+    throw new Error(`${name}: используй формат ДД.ММ.ГГГГ, например 18.06.2026.`);
+  }
+
+  const day = match[1].padStart(2, "0");
+  const month = match[2].padStart(2, "0");
+  const year = match[3].length === 2 ? `20${match[3]}` : match[3];
+
+  return assertDateOnly(`${year}-${month}-${day}`, name);
+}
+
 export function parseTime(value, name = "Время") {
   const match = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(value || "");
   if (!match) {
@@ -191,10 +207,6 @@ export function getScheduledEventDate({
 }
 
 export function formatDateRu(date) {
-  return new Intl.DateTimeFormat("ru-RU", {
-    day: "numeric",
-    month: "long",
-    year: "numeric",
-    timeZone: "UTC",
-  }).format(parseDateOnly(date));
+  const [year, month, day] = String(date).split("-");
+  return `${day}.${month}.${year.slice(2)}`;
 }

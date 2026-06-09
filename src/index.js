@@ -11,11 +11,13 @@ import {
   pluralizeRu,
 } from "./schedule.js";
 import {
+  assertTimezone,
   buildEvent,
   eventTypeLabel,
   fieldsForEventType,
   formatInterval,
   parseEventField,
+  TIMEZONE_OPTIONS,
 } from "./events.js";
 import {
   claimPublish,
@@ -108,6 +110,24 @@ function callbackKeyboard(rows) {
       })),
     ),
   };
+}
+
+// Two-per-row timezone buttons. `makeCb(id)` builds the callback_data so the
+// same grid serves both the create wizard (`wiz:tz:<id>`) and editing
+// (`ev:settz:<eventId>:<id>`). The option matching `selectedId` is marked ✓.
+function timezoneKeyboardRows(makeCb, selectedId = null) {
+  const rows = [];
+
+  for (let i = 0; i < TIMEZONE_OPTIONS.length; i += 2) {
+    rows.push(
+      TIMEZONE_OPTIONS.slice(i, i + 2).map((tz) => [
+        tz.id === selectedId ? `✓ ${tz.label}` : tz.label,
+        makeCb(tz.id),
+      ]),
+    );
+  }
+
+  return rows;
 }
 
 async function send(app, chatId, text, extra = {}) {
@@ -278,7 +298,7 @@ function eventRows(event, manager) {
         ["⌛ Длительность", `ev:edit:${event.id}:pollDurationHours`],
         ["👥 Кворум", `ev:edit:${event.id}:quorumCount`],
       ],
-      [["🌍 Timezone", `ev:edit:${event.id}:timezone`]],
+      [["🌍 Часовой пояс", `ev:tzask:${event.id}`]],
       [
         [
           event.active ? "⏸ Приостановить" : "▶️ Возобновить",
@@ -339,8 +359,8 @@ function promptFor(field, eventType) {
     title: "Введи название мероприятия. Например: Волейбол",
     startDate:
       eventType === EVENT_TYPES.ONE_TIME
-        ? "Введи дату мероприятия в формате YYYY-MM-DD. Например: 2026-06-18"
-        : "Введи первую дату повторяющегося мероприятия в формате YYYY-MM-DD. Например: 2026-06-18",
+        ? "Введи дату мероприятия в формате ДД.ММ.ГГГГ. Например: 18.06.2026"
+        : "Введи первую дату повторяющегося мероприятия в формате ДД.ММ.ГГГГ. Например: 18.06.2026",
     intervalDays:
       "Через сколько дней мероприятие повторяется? Например: 14",
     publishDaysBefore:
@@ -352,7 +372,7 @@ function promptFor(field, eventType) {
     quorumCount:
       "Сколько ответов «✅ Буду» нужно для кворума? Например: 3",
     timezone:
-      "Введи timezone. Например: Europe/Moscow",
+      "Впиши часовой пояс (IANA). Например: Europe/Moscow",
   };
 
   return prompts[field];
@@ -378,11 +398,28 @@ function mentionPrompt(user, body) {
 }
 
 async function ask(app, session, field, chatId, threadId, user) {
-  const { text, extra } = mentionPrompt(user, promptFor(field, session.eventType));
+  // The timezone step in the create wizard is button-driven (single-select),
+  // unlike the text-driven edit path which keeps using promptFor("timezone").
+  const isCreateTimezone = field === "timezone" && session.mode === "create";
+
+  const { text, extra } = mentionPrompt(
+    user,
+    isCreateTimezone ? "Выбери часовой пояс:" : promptFor(field, session.eventType),
+  );
+
+  const replyMarkup = isCreateTimezone
+    ? {
+        reply_markup: callbackKeyboard([
+          ...timezoneKeyboardRows((id) => `wiz:tz:${id}`),
+          [["🌍 Другой часовой пояс", "wiz:tz:other"]],
+        ]),
+      }
+    : {};
 
   const message = await send(app, chatId, text, {
     ...topicPayload(threadId),
     ...extra,
+    ...replyMarkup,
   });
 
   session.field = field;
@@ -456,6 +493,36 @@ async function startChangeTypeToRecurring(app, message, event, user) {
     session.threadId,
     user,
   );
+}
+
+// Records the create-wizard answer for the current field, then either asks the
+// next field or finalizes the event. Shared by the text path (handleSessionMessage)
+// and the button-driven timezone step (wiz:tz callback).
+async function recordAnswerAndContinue(app, session, key, chatId, threadId, user, value) {
+  session.values[session.field] = value;
+  session.index += 1;
+
+  if (session.index < session.fields.length) {
+    await ask(app, session, session.fields[session.index], chatId, threadId, user);
+    return;
+  }
+
+  const event = buildEvent({
+    type: session.eventType,
+    chatId: session.chatId,
+    messageThreadId: session.threadId,
+    createdBy: session.userId,
+    timezone: session.values.timezone ?? app.config.timezone,
+    values: session.values,
+  });
+
+  await insertEvent(app.db, event);
+  await clearSession(app.db, key);
+
+  await send(app, chatId, `✅ Мероприятие добавлено.\n\n${formatEvent(event)}`, {
+    ...topicPayload(threadId),
+    reply_markup: callbackKeyboard(eventRows(event, true)),
+  });
 }
 
 async function handleSessionMessage(app, message) {
@@ -544,42 +611,14 @@ async function handleSessionMessage(app, message) {
       return true;
     }
 
-    session.values[session.field] = parsed;
-    session.index += 1;
-
-    if (session.index < session.fields.length) {
-      await ask(
-        app,
-        session,
-        session.fields[session.index],
-        message.chat.id,
-        session.threadId,
-        message.from,
-      );
-
-      return true;
-    }
-
-    const event = buildEvent({
-      type: session.eventType,
-      chatId: session.chatId,
-      messageThreadId: session.threadId,
-      createdBy: session.userId,
-      timezone: app.config.timezone,
-      values: session.values,
-    });
-
-    await insertEvent(app.db, event);
-    await clearSession(app.db, key);
-
-    await send(
+    await recordAnswerAndContinue(
       app,
+      session,
+      key,
       message.chat.id,
-      `✅ Мероприятие добавлено.\n\n${formatEvent(event)}`,
-      {
-        ...topicPayload(message.message_thread_id),
-        reply_markup: callbackKeyboard(eventRows(event, true)),
-      },
+      session.threadId,
+      message.from,
+      parsed,
     );
 
     return true;
@@ -872,6 +911,48 @@ async function handleCallback(app, query) {
     return startCreate(app, message, eventType, user);
   }
 
+  // Create-wizard timezone step (button-driven). Handled before the generic
+  // event lookup below because no event exists yet. The session key
+  // (chatId:userId) scopes the action to the wizard owner.
+  if (data.startsWith("wiz:tz:")) {
+    const choice = data.slice("wiz:tz:".length);
+    const key = sessionKey(message.chat.id, user.id);
+    const session = await getSession(app.db, key);
+
+    if (!session || session.mode !== "create" || session.field !== "timezone") {
+      return answerCallback(app, query.id, "Шаг уже неактуален.", true);
+    }
+
+    if (choice === "other") {
+      await answerCallback(app, query.id);
+      // Drop the keyboard and wait for a typed IANA zone (handleSessionMessage).
+      await telegram(app.config.botToken, "editMessageText", {
+        chat_id: message.chat.id,
+        message_id: message.message_id,
+        text: "Впиши свой часовой пояс (IANA), например Asia/Almaty:",
+      });
+      return null;
+    }
+
+    let value;
+    try {
+      value = assertTimezone(choice);
+    } catch {
+      return answerCallback(app, query.id, "Неизвестный пояс.", true);
+    }
+
+    await answerCallback(app, query.id);
+    return recordAnswerAndContinue(
+      app,
+      session,
+      key,
+      message.chat.id,
+      session.threadId,
+      user,
+      value,
+    );
+  }
+
   const parts = data.split(":");
   const eventId = parts[2];
   const event = await getEvent(app.db, eventId);
@@ -963,6 +1044,49 @@ async function handleCallback(app, query) {
       "Неизвестный тип мероприятия.",
       true,
     );
+  }
+
+  if (data.startsWith("ev:tzask:")) {
+    await answerCallback(app, query.id);
+
+    return editMenu(
+      app,
+      message,
+      `Выбери часовой пояс для «${event.title}»:`,
+      [
+        ...timezoneKeyboardRows(
+          (id) => `ev:settz:${event.id}:${id}`,
+          event.timezone,
+        ),
+        [["🌍 Другой часовой пояс", `ev:edit:${event.id}:timezone`]],
+        [["← Назад", `ev:view:${event.id}`]],
+      ],
+    );
+  }
+
+  if (data.startsWith("ev:settz:")) {
+    const tz = parts.slice(3).join(":");
+
+    let value;
+    try {
+      value = assertTimezone(tz);
+    } catch {
+      return answerCallback(app, query.id, "Неизвестный пояс.", true);
+    }
+
+    const updated = {
+      ...event,
+      timezone: value,
+      updatedAt: new Date().toISOString(),
+    };
+
+    await updateEventFields(app.db, event.id, {
+      timezone: value,
+      updatedAt: updated.updatedAt,
+    });
+
+    await answerCallback(app, query.id, "Часовой пояс изменён.");
+    return showEvent(app, message, updated, true);
   }
 
   if (data.startsWith("ev:toggle:")) {

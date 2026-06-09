@@ -2,10 +2,28 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   EVENT_TYPES,
+  formatDateRu,
   formatRelativeDateRu,
   getNextEventDate,
   getScheduledEventDate,
+  parseDateInput,
 } from "../src/schedule.js";
+
+test("formatDateRu renders DD.MM.YY", () => {
+  assert.equal(formatDateRu("2026-06-18"), "18.06.26");
+  assert.equal(formatDateRu("2026-01-05"), "05.01.26");
+});
+
+test("parseDateInput accepts DD.MM.YYYY and DD.MM.YY, returns ISO", () => {
+  assert.equal(parseDateInput("18.06.2026"), "2026-06-18");
+  assert.equal(parseDateInput("18.06.26"), "2026-06-18");
+  assert.equal(parseDateInput("8.6.26"), "2026-06-08");
+});
+
+test("parseDateInput rejects ISO format and impossible dates", () => {
+  assert.throws(() => parseDateInput("2026-06-18"), /ДД\.ММ\.ГГГГ/);
+  assert.throws(() => parseDateInput("30.02.2026"), /такой календарной даты не существует/);
+});
 
 test("relative words: today, tomorrow, day after tomorrow, through N days", () => {
   assert.equal(formatRelativeDateRu({ fromDate: "2026-06-10", eventDate: "2026-06-10" }), "сегодня");

@@ -1,6 +1,6 @@
 import {
-  assertDateOnly,
   EVENT_TYPES,
+  parseDateInput,
   parseTime,
   pluralizeRu,
 } from "./schedule.js";
@@ -34,8 +34,20 @@ export function fieldsForEventType(type) {
     "startDate",
     ...(type === EVENT_TYPES.RECURRING ? ["intervalDays"] : []),
     ...COMMON_FIELDS_AFTER_DATE,
+    "timezone",
   ];
 }
+
+// Curated single-select list of popular timezones. Anything not listed is
+// reachable via the "Другой часовой пояс" button (free-text entry).
+export const TIMEZONE_OPTIONS = [
+  { id: "Europe/Kaliningrad", label: "Калининград · UTC+2" },
+  { id: "Europe/Moscow", label: "Москва · UTC+3" },
+  { id: "Asia/Yekaterinburg", label: "Екатеринбург · UTC+5" },
+  { id: "Asia/Novosibirsk", label: "Новосибирск · UTC+7" },
+  { id: "Asia/Irkutsk", label: "Иркутск · UTC+8" },
+  { id: "Asia/Vladivostok", label: "Владивосток · UTC+10" },
+];
 
 export function assertTimezone(value) {
   try {
@@ -82,7 +94,7 @@ export function parseEventField(field, raw) {
       return value;
 
     case "startDate":
-      return assertDateOnly(value, "Дата мероприятия");
+      return parseDateInput(value, "Дата мероприятия");
 
     case "intervalDays":
       return parseInteger(value, 1, 3650, "Периодичность");
