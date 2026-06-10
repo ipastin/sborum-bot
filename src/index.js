@@ -1,4 +1,3 @@
-import fs from "node:fs";
 import {
   dateKey,
   diffDays,
@@ -12,69 +11,70 @@ import {
   pluralizeRu,
 } from "./schedule.js";
 import {
+  assertTimezone,
   buildEvent,
   eventTypeLabel,
   fieldsForEventType,
   formatInterval,
   parseEventField,
+  TIMEZONE_OPTIONS,
 } from "./events.js";
-import { loadState, saveState } from "./store.js";
+import {
+  claimPublish,
+  clearSession,
+  clearStaleSessions,
+  deleteEvent,
+  getActiveEvents,
+  getEvent,
+  getEventsForChat,
+  getOpenPollsDuePastClose,
+  getOpenPollsForChat,
+  getPoll,
+  getPublishedDates,
+  getSession,
+  insertEvent,
+  insertPoll,
+  recordPublishedPoll,
+  releasePublish,
+  removeVote,
+  setPollClosed,
+  setPollQuorumState,
+  setSession,
+  updateEventFields,
+  upsertVote,
+} from "./store.js";
 
 const APP_NAME = "sborum-bot";
-const APP_VERSION = "2.1.0";
+const APP_VERSION = "3.0.3";
 
-loadDotEnvIfPresent();
+const SESSION_TTL_MS = 24 * 3_600_000;
 
-const config = loadConfig();
-const state = loadState(config.stateFile);
-const sessions = new Map();
-
-let updateOffset = 0;
-let schedulerBusy = false;
-
-function loadDotEnvIfPresent(file = ".env") {
-  if (!fs.existsSync(file)) return;
-
-  for (const rawLine of fs.readFileSync(file, "utf8").split(/\r?\n/)) {
-    const line = rawLine.trim();
-
-    if (!line || line.startsWith("#")) continue;
-
-    const separatorIndex = line.indexOf("=");
-    if (separatorIndex < 1) continue;
-
-    const key = line.slice(0, separatorIndex).trim();
-    let value = line.slice(separatorIndex + 1).trim();
-
-    if (
-      (value.startsWith('"') && value.endsWith('"')) ||
-      (value.startsWith("'") && value.endsWith("'"))
-    ) {
-      value = value.slice(1, -1);
-    }
-
-    if (!(key in process.env)) {
-      process.env[key] = value;
-    }
-  }
-}
-
-function loadConfig() {
-  if (!process.env.BOT_TOKEN) {
+// `app` bundles the per-request dependencies (D1 binding + config) that flow
+// through every handler, replacing the module-level globals the VPS build used.
+function buildConfig(env) {
+  if (!env.BOT_TOKEN) {
     throw new Error("Missing BOT_TOKEN.");
   }
 
   return {
-    botToken: process.env.BOT_TOKEN,
-    ownerUserId: process.env.OWNER_USER_ID || null,
-    stateFile: process.env.STATE_FILE || "./data/state.json",
-    timezone: process.env.TIMEZONE || "Europe/Moscow",
+    botToken: env.BOT_TOKEN,
+    ownerUserId: env.OWNER_USER_ID || null,
+    timezone: env.TIMEZONE || "Europe/Moscow",
+    webhookSecret: env.TELEGRAM_WEBHOOK_SECRET || null,
   };
 }
 
-async function telegram(method, payload = {}) {
+function createApp(env) {
+  if (!env.DB) {
+    throw new Error("Missing D1 binding (env.DB).");
+  }
+
+  return { db: env.DB, config: buildConfig(env) };
+}
+
+async function telegram(token, method, payload = {}) {
   const response = await fetch(
-    `https://api.telegram.org/bot${config.botToken}/${method}`,
+    `https://api.telegram.org/bot${token}/${method}`,
     {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -91,10 +91,6 @@ async function telegram(method, payload = {}) {
   }
 
   return body.result;
-}
-
-function save() {
-  saveState(config.stateFile, state);
 }
 
 function sessionKey(chatId, userId) {
@@ -116,17 +112,35 @@ function callbackKeyboard(rows) {
   };
 }
 
-async function send(chatId, text, extra = {}) {
-  return telegram("sendMessage", {
+// Two-per-row timezone buttons. `makeCb(id)` builds the callback_data so the
+// same grid serves both the create wizard (`wiz:tz:<id>`) and editing
+// (`ev:settz:<eventId>:<id>`). The option matching `selectedId` is marked ✓.
+function timezoneKeyboardRows(makeCb, selectedId = null) {
+  const rows = [];
+
+  for (let i = 0; i < TIMEZONE_OPTIONS.length; i += 2) {
+    rows.push(
+      TIMEZONE_OPTIONS.slice(i, i + 2).map((tz) => [
+        tz.id === selectedId ? `✓ ${tz.label}` : tz.label,
+        makeCb(tz.id),
+      ]),
+    );
+  }
+
+  return rows;
+}
+
+async function send(app, chatId, text, extra = {}) {
+  return telegram(app.config.botToken, "sendMessage", {
     chat_id: chatId,
     text,
     ...extra,
   });
 }
 
-async function editMenu(message, text, rows) {
+async function editMenu(app, message, text, rows) {
   try {
-    return await telegram("editMessageText", {
+    return await telegram(app.config.botToken, "editMessageText", {
       chat_id: message.chat.id,
       message_id: message.message_id,
       text,
@@ -138,9 +152,9 @@ async function editMenu(message, text, rows) {
   }
 }
 
-async function answerCallback(id, text = undefined, showAlert = false) {
+async function answerCallback(app, id, text = undefined, showAlert = false) {
   try {
-    return await telegram("answerCallbackQuery", {
+    return await telegram(app.config.botToken, "answerCallbackQuery", {
       callback_query_id: id,
       ...(text ? { text, show_alert: showAlert } : {}),
     });
@@ -150,10 +164,9 @@ async function answerCallback(id, text = undefined, showAlert = false) {
   }
 }
 
-function eventsForChat(chatId) {
-  return Object.values(state.events)
-    .filter((event) => String(event.chatId) === String(chatId))
-    .sort((a, b) => a.title.localeCompare(b.title, "ru"));
+async function eventsForChat(app, chatId) {
+  const events = await getEventsForChat(app.db, chatId);
+  return events.sort((a, b) => a.title.localeCompare(b.title, "ru"));
 }
 
 function getToday(event, now = new Date()) {
@@ -180,16 +193,9 @@ function isSchedulable(event, now = new Date()) {
   return event.active && nextEventDate(event, now) !== null;
 }
 
-function schedulableEventsForChat(chatId) {
-  return eventsForChat(chatId).filter((event) => isSchedulable(event));
-}
-
-function publishedDates(event) {
-  const prefix = `${event.id}:`;
-
-  return Object.keys(state.publishedEvents)
-    .filter((key) => key.startsWith(prefix))
-    .map((key) => key.slice(prefix.length));
+async function schedulableEventsForChat(app, chatId) {
+  const events = await eventsForChat(app, chatId);
+  return events.filter((event) => isSchedulable(event));
 }
 
 function statusIcon(event) {
@@ -237,16 +243,14 @@ function formatEvent(event, now = new Date()) {
   return lines.join("\n");
 }
 
-function listText(chatId) {
-  const events = eventsForChat(chatId);
-
+function listText(events) {
   return events.length
     ? `Мероприятия чата: ${events.length}\n\nВыбери мероприятие:`
     : "В этом чате пока нет мероприятий.";
 }
 
-function listRows(chatId, manager) {
-  const rows = eventsForChat(chatId).map((event) => [
+function listRows(events, manager) {
+  const rows = events.map((event) => [
     [
       `${statusIcon(event)} ${event.title} · ${
         event.type === EVENT_TYPES.ONE_TIME ? "разовое" : "повтор"
@@ -294,7 +298,7 @@ function eventRows(event, manager) {
         ["⌛ Длительность", `ev:edit:${event.id}:pollDurationHours`],
         ["👥 Кворум", `ev:edit:${event.id}:quorumCount`],
       ],
-      [["🌍 Timezone", `ev:edit:${event.id}:timezone`]],
+      [["🌍 Часовой пояс", `ev:tzask:${event.id}`]],
       [
         [
           event.active ? "⏸ Приостановить" : "▶️ Возобновить",
@@ -311,16 +315,16 @@ function eventRows(event, manager) {
   return rows;
 }
 
-async function isManager(chatId, userId) {
+async function isManager(app, chatId, userId) {
   if (
-    config.ownerUserId &&
-    String(config.ownerUserId) === String(userId)
+    app.config.ownerUserId &&
+    String(app.config.ownerUserId) === String(userId)
   ) {
     return true;
   }
 
   try {
-    const member = await telegram("getChatMember", {
+    const member = await telegram(app.config.botToken, "getChatMember", {
       chat_id: chatId,
       user_id: userId,
     });
@@ -331,21 +335,23 @@ async function isManager(chatId, userId) {
   }
 }
 
-async function showList(message, manager, useEdit = false) {
-  const rows = listRows(message.chat.id, manager);
+async function showList(app, message, manager, useEdit = false) {
+  const events = await eventsForChat(app, message.chat.id);
+  const text = listText(events);
+  const rows = listRows(events, manager);
 
   if (useEdit) {
-    return editMenu(message, listText(message.chat.id), rows);
+    return editMenu(app, message, text, rows);
   }
 
-  return send(message.chat.id, listText(message.chat.id), {
+  return send(app, message.chat.id, text, {
     ...topicPayload(message.message_thread_id),
     ...(rows.length ? { reply_markup: callbackKeyboard(rows) } : {}),
   });
 }
 
-async function showEvent(message, event, manager) {
-  return editMenu(message, formatEvent(event), eventRows(event, manager));
+async function showEvent(app, message, event, manager) {
+  return editMenu(app, message, formatEvent(event), eventRows(event, manager));
 }
 
 function promptFor(field, eventType) {
@@ -353,8 +359,8 @@ function promptFor(field, eventType) {
     title: "Введи название мероприятия. Например: Волейбол",
     startDate:
       eventType === EVENT_TYPES.ONE_TIME
-        ? "Введи дату мероприятия в формате YYYY-MM-DD. Например: 2026-06-18"
-        : "Введи первую дату повторяющегося мероприятия в формате YYYY-MM-DD. Например: 2026-06-18",
+        ? "Введи дату мероприятия в формате ДД.ММ.ГГГГ. Например: 18.06.2026"
+        : "Введи первую дату повторяющегося мероприятия в формате ДД.ММ.ГГГГ. Например: 18.06.2026",
     intervalDays:
       "Через сколько дней мероприятие повторяется? Например: 14",
     publishDaysBefore:
@@ -366,30 +372,65 @@ function promptFor(field, eventType) {
     quorumCount:
       "Сколько ответов «✅ Буду» нужно для кворума? Например: 3",
     timezone:
-      "Введи timezone. Например: Europe/Moscow",
+      "Впиши часовой пояс (IANA). Например: Europe/Moscow",
   };
 
   return prompts[field];
 }
 
-async function ask(session, field, chatId, threadId) {
-  const message = await send(chatId, promptFor(field, session.eventType), {
-    ...topicPayload(threadId),
-    reply_markup: {
-      force_reply: true,
-      selective: true,
-      input_field_placeholder: "Ответь на это сообщение",
+// Build a wizard prompt that mentions the asked user. Telegram force-reply is
+// unreliable in groups (it does not auto-engage across clients, and `selective`
+// only targets @username mentions, not text_mention by id), so we do not rely
+// on it. Instead the bot reads the user's next plain message (see
+// handleSessionMessage) — which requires the bot's group privacy mode to be
+// OFF. The mention makes it clear whose turn it is and pings them.
+function mentionPrompt(user, body) {
+  const name = (user?.first_name || "Участник").trim() || "Участник";
+
+  return {
+    text: `${name}, ${body}`,
+    extra: {
+      entities: [
+        { type: "text_mention", offset: 0, length: name.length, user: { id: user.id } },
+      ],
     },
+  };
+}
+
+async function ask(app, session, field, chatId, threadId, user) {
+  // The timezone step in the create wizard is button-driven (single-select),
+  // unlike the text-driven edit path which keeps using promptFor("timezone").
+  const isCreateTimezone = field === "timezone" && session.mode === "create";
+
+  const { text, extra } = mentionPrompt(
+    user,
+    isCreateTimezone ? "Выбери часовой пояс:" : promptFor(field, session.eventType),
+  );
+
+  const replyMarkup = isCreateTimezone
+    ? {
+        reply_markup: callbackKeyboard([
+          ...timezoneKeyboardRows((id) => `wiz:tz:${id}`),
+          [["🌍 Другой часовой пояс", "wiz:tz:other"]],
+        ]),
+      }
+    : {};
+
+  const message = await send(app, chatId, text, {
+    ...topicPayload(threadId),
+    ...extra,
+    ...replyMarkup,
   });
 
   session.field = field;
   session.promptMessageId = message.message_id;
 
-  sessions.set(sessionKey(chatId, session.userId), session);
+  await setSession(app.db, sessionKey(chatId, session.userId), session);
 }
 
-async function askEventType(message) {
+async function askEventType(app, message) {
   return send(
+    app,
     message.chat.id,
     "Какое мероприятие добавить?",
     {
@@ -404,86 +445,132 @@ async function askEventType(message) {
   );
 }
 
-async function startCreate(message, eventType, userId = message.from.id) {
+async function startCreate(app, message, eventType, user) {
   const fields = fieldsForEventType(eventType);
 
   const session = {
     mode: "create",
     eventType,
     fields,
-    userId,
+    userId: user.id,
     chatId: String(message.chat.id),
     threadId: message.message_thread_id || null,
     values: {},
     index: 0,
   };
 
-  await ask(session, fields[0], message.chat.id, session.threadId);
+  await ask(app, session, fields[0], message.chat.id, session.threadId, user);
 }
 
-async function startEdit(message, event, field, userId) {
+async function startEdit(app, message, event, field, user) {
   const session = {
     mode: "edit",
     eventType: event.type,
-    userId,
+    userId: user.id,
     chatId: String(message.chat.id),
     threadId: message.message_thread_id || null,
     eventId: event.id,
   };
 
-  await ask(session, field, message.chat.id, session.threadId);
+  await ask(app, session, field, message.chat.id, session.threadId, user);
 }
 
-async function startChangeTypeToRecurring(message, event, userId) {
+async function startChangeTypeToRecurring(app, message, event, user) {
   const session = {
     mode: "change_type_to_recurring",
     eventType: EVENT_TYPES.RECURRING,
-    userId,
+    userId: user.id,
     chatId: String(message.chat.id),
     threadId: message.message_thread_id || null,
     eventId: event.id,
   };
 
   await ask(
+    app,
     session,
     "intervalDays",
     message.chat.id,
     session.threadId,
+    user,
   );
 }
 
-async function handleSessionMessage(message) {
+// Records the create-wizard answer for the current field, then either asks the
+// next field or finalizes the event. Shared by the text path (handleSessionMessage)
+// and the button-driven timezone step (wiz:tz callback).
+async function recordAnswerAndContinue(app, session, key, chatId, threadId, user, value) {
+  session.values[session.field] = value;
+  session.index += 1;
+
+  if (session.index < session.fields.length) {
+    await ask(app, session, session.fields[session.index], chatId, threadId, user);
+    return;
+  }
+
+  const event = buildEvent({
+    type: session.eventType,
+    chatId: session.chatId,
+    messageThreadId: session.threadId,
+    createdBy: session.userId,
+    timezone: session.values.timezone ?? app.config.timezone,
+    values: session.values,
+  });
+
+  await insertEvent(app.db, event);
+  await clearSession(app.db, key);
+
+  await send(app, chatId, `✅ Мероприятие добавлено.\n\n${formatEvent(event)}`, {
+    ...topicPayload(threadId),
+    reply_markup: callbackKeyboard(eventRows(event, true)),
+  });
+}
+
+async function handleSessionMessage(app, message) {
   const key = sessionKey(message.chat.id, message.from.id);
-  const session = sessions.get(key);
+  const session = await getSession(app.db, key);
 
   if (!session) return false;
 
-  if (message.reply_to_message?.message_id !== session.promptMessageId) {
+  const text = message.text;
+
+  // A reply is NOT required: Telegram force-reply is unreliable in groups, so we
+  // treat this user's next message as the wizard answer (matched by the session
+  // key = chatId:userId). The bot's group privacy mode must be OFF for plain
+  // group answers to arrive. Commands fall through to the command handler, and
+  // non-text messages are ignored.
+  if (!text || text.trim().startsWith("/")) {
     return false;
   }
 
   try {
-    const parsed = parseEventField(session.field, message.text);
+    const parsed = parseEventField(session.field, text);
 
     if (session.mode === "edit") {
-      const event = state.events[session.eventId];
+      const event = await getEvent(app.db, session.eventId);
 
       if (!event) {
         throw new Error("Мероприятие уже удалено.");
       }
 
-      event[session.field] = parsed;
-      event.updatedAt = new Date().toISOString();
+      const updated = {
+        ...event,
+        [session.field]: parsed,
+        updatedAt: new Date().toISOString(),
+      };
 
-      save();
-      sessions.delete(key);
+      await updateEventFields(app.db, event.id, {
+        [session.field]: parsed,
+        updatedAt: updated.updatedAt,
+      });
+      await clearSession(app.db, key);
 
       await send(
+        app,
         message.chat.id,
-        `✅ Сохранено.\n\n${formatEvent(event)}`,
+        `✅ Сохранено.\n\n${formatEvent(updated)}`,
         {
           ...topicPayload(message.message_thread_id),
-          reply_markup: callbackKeyboard(eventRows(event, true)),
+          reply_markup: callbackKeyboard(eventRows(updated, true)),
         },
       );
 
@@ -491,91 +578,70 @@ async function handleSessionMessage(message) {
     }
 
     if (session.mode === "change_type_to_recurring") {
-      const event = state.events[session.eventId];
+      const event = await getEvent(app.db, session.eventId);
 
       if (!event) {
         throw new Error("Мероприятие уже удалено.");
       }
 
-      event.type = EVENT_TYPES.RECURRING;
-      event.intervalDays = parsed;
-      event.updatedAt = new Date().toISOString();
+      const updated = {
+        ...event,
+        type: EVENT_TYPES.RECURRING,
+        intervalDays: parsed,
+        updatedAt: new Date().toISOString(),
+      };
 
-      save();
-      sessions.delete(key);
+      await updateEventFields(app.db, event.id, {
+        type: updated.type,
+        intervalDays: updated.intervalDays,
+        updatedAt: updated.updatedAt,
+      });
+      await clearSession(app.db, key);
 
       await send(
+        app,
         message.chat.id,
-        `✅ Тип изменён.\n\n${formatEvent(event)}`,
+        `✅ Тип изменён.\n\n${formatEvent(updated)}`,
         {
           ...topicPayload(message.message_thread_id),
-          reply_markup: callbackKeyboard(eventRows(event, true)),
+          reply_markup: callbackKeyboard(eventRows(updated, true)),
         },
       );
 
       return true;
     }
 
-    session.values[session.field] = parsed;
-    session.index += 1;
-
-    if (session.index < session.fields.length) {
-      await ask(
-        session,
-        session.fields[session.index],
-        message.chat.id,
-        session.threadId,
-      );
-
-      return true;
-    }
-
-    const event = buildEvent({
-      type: session.eventType,
-      chatId: session.chatId,
-      messageThreadId: session.threadId,
-      createdBy: session.userId,
-      timezone: config.timezone,
-      values: session.values,
-    });
-
-    state.events[event.id] = event;
-
-    save();
-    sessions.delete(key);
-
-    await send(
+    await recordAnswerAndContinue(
+      app,
+      session,
+      key,
       message.chat.id,
-      `✅ Мероприятие добавлено.\n\n${formatEvent(event)}`,
-      {
-        ...topicPayload(message.message_thread_id),
-        reply_markup: callbackKeyboard(eventRows(event, true)),
-      },
+      session.threadId,
+      message.from,
+      parsed,
     );
 
     return true;
   } catch (error) {
-    const retryMessage = await send(
-      message.chat.id,
+    const { text, extra } = mentionPrompt(
+      message.from,
       `Не удалось сохранить: ${error.message}\n\nПопробуй ещё раз или отправь /cancel.`,
-      {
-        ...topicPayload(message.message_thread_id),
-        reply_markup: {
-          force_reply: true,
-          selective: true,
-          input_field_placeholder: "Исправь значение",
-        },
-      },
     );
 
+    const retryMessage = await send(app, message.chat.id, text, {
+      ...topicPayload(message.message_thread_id),
+      ...extra,
+    });
+
     session.promptMessageId = retryMessage.message_id;
-    sessions.set(key, session);
+    await setSession(app.db, key, session);
 
     return true;
   }
 }
 
 async function publishPoll(
+  app,
   event,
   { manual = false, eventDate = null } = {},
 ) {
@@ -587,49 +653,71 @@ async function publishPoll(
     );
   }
 
-  const relativeDate = formatRelativeDateRu({
-    fromDate: getToday(event),
-    eventDate: selectedDate,
-  });
-
-  const reminder = await send(
-    event.chatId,
-    [
-      manual
-        ? "Тестовая публикация."
-        : "Напоминание о предстоящем мероприятии.",
-      `Мероприятие «${event.title}» состоится ${relativeDate}: ${formatDateRu(
-        selectedDate,
-      )}.`,
-      `Минимальный кворум — ${event.quorumCount} ${pluralizeRu(
-        event.quorumCount,
-        "человек",
-        "человека",
-        "человек",
-      )}.`,
-      "Пожалуйста, отметь актуальный вариант в голосовании ниже.",
-    ].join("\n"),
-    topicPayload(event.messageThreadId),
-  );
-
-  const poll = await telegram("sendPoll", {
-    chat_id: event.chatId,
-    question: `Кто будет на мероприятии «${event.title}» ${formatDateRu(
-      selectedDate,
-    )}?`,
-    options: [
-      { text: "✅ Буду" },
-      { text: "❌ Не смогу" },
-      { text: "🤔 Пока не знаю" },
-    ],
-    is_anonymous: false,
-    allows_multiple_answers: false,
-    ...topicPayload(event.messageThreadId),
-  });
-
   const createdAt = new Date().toISOString();
 
-  state.polls[poll.poll.id] = {
+  // Scheduled publishes reserve the (event, date) slot before any Telegram
+  // call. A second overlapping or double-delivered cron tick fails to claim
+  // and returns without posting a duplicate poll.
+  if (
+    !manual &&
+    !(await claimPublish(app.db, event.id, selectedDate, createdAt))
+  ) {
+    return;
+  }
+
+  let reminder;
+  let poll;
+
+  try {
+    const relativeDate = formatRelativeDateRu({
+      fromDate: getToday(event),
+      eventDate: selectedDate,
+    });
+
+    reminder = await send(
+      app,
+      event.chatId,
+      [
+        manual
+          ? "Тестовая публикация."
+          : "Напоминание о предстоящем мероприятии.",
+        `Мероприятие «${event.title}» состоится ${relativeDate}: ${formatDateRu(
+          selectedDate,
+        )}.`,
+        `Минимальный кворум — ${event.quorumCount} ${pluralizeRu(
+          event.quorumCount,
+          "человек",
+          "человека",
+          "человек",
+        )}.`,
+        "Пожалуйста, отметь актуальный вариант в голосовании ниже.",
+      ].join("\n"),
+      topicPayload(event.messageThreadId),
+    );
+
+    poll = await telegram(app.config.botToken, "sendPoll", {
+      chat_id: event.chatId,
+      question: `Кто будет на мероприятии «${event.title}» ${formatDateRu(
+        selectedDate,
+      )}?`,
+      options: [
+        { text: "✅ Буду" },
+        { text: "❌ Не смогу" },
+        { text: "🤔 Пока не знаю" },
+      ],
+      is_anonymous: false,
+      allows_multiple_answers: false,
+      ...topicPayload(event.messageThreadId),
+    });
+  } catch (error) {
+    // The poll was not posted — release the claim so a later tick can retry.
+    if (!manual) {
+      await releasePublish(app.db, event.id, selectedDate);
+    }
+    throw error;
+  }
+
+  const pollRecord = {
     pollId: poll.poll.id,
     eventId: event.id,
     messageId: poll.message_id,
@@ -642,19 +730,19 @@ async function publishPoll(
       Date.now() + event.pollDurationHours * 3_600_000,
     ).toISOString(),
     closed: false,
+    closedAt: null,
     quorumState: "below",
     selections: {},
     manual,
   };
 
-  if (!manual) {
-    state.publishedEvents[`${event.id}:${selectedDate}`] = {
-      pollId: poll.poll.id,
-      publishedAt: createdAt,
-    };
+  // The poll is already live; record it without releasing the claim on a write
+  // error, so a retry can never post a duplicate of an already-posted poll.
+  if (manual) {
+    await insertPoll(app.db, pollRecord);
+  } else {
+    await recordPublishedPoll(app.db, pollRecord);
   }
-
-  save();
 }
 
 function yesCount(poll) {
@@ -663,8 +751,8 @@ function yesCount(poll) {
   ).length;
 }
 
-function pollStatus(poll) {
-  const event = state.events[poll.eventId] || { quorumCount: 3 };
+function pollStatus(poll, event) {
+  const resolved = event || { quorumCount: 3 };
   const selections = Object.values(poll.selections);
 
   const yes = yesCount(poll);
@@ -676,27 +764,28 @@ function pollStatus(poll) {
   ).length;
 
   return [
-    `Статус «${event.title || "Мероприятие"}» на ${formatDateRu(
+    `Статус «${resolved.title || "Мероприятие"}» на ${formatDateRu(
       poll.eventDate,
     )}:`,
     `✅ Будут: ${yes}`,
     `❌ Не смогут: ${no}`,
     `🤔 Пока не знают: ${unsure}`,
     "",
-    yes >= event.quorumCount
+    yes >= resolved.quorumCount
       ? "Кворум набран."
-      : `До кворума не хватает: ${event.quorumCount - yes}.`,
+      : `До кворума не хватает: ${resolved.quorumCount - yes}.`,
   ].join("\n");
 }
 
 async function closePoll(
+  app,
   poll,
   reason = "Голосование закрыто автоматически.",
 ) {
   if (poll.closed) return;
 
   try {
-    await telegram("stopPoll", {
+    await telegram(app.config.botToken, "stopPoll", {
       chat_id: poll.chatId,
       message_id: poll.messageId,
     });
@@ -704,14 +793,14 @@ async function closePoll(
     // The poll can already be closed manually in Telegram.
   }
 
-  poll.closed = true;
-  poll.closedAt = new Date().toISOString();
+  await setPollClosed(app.db, poll.pollId, new Date().toISOString());
 
-  save();
+  const event = await getEvent(app.db, poll.eventId);
 
   await send(
+    app,
     poll.chatId,
-    `${reason}\n\n${pollStatus(poll)}`,
+    `${reason}\n\n${pollStatus(poll, event)}`,
     {
       ...topicPayload(poll.messageThreadId),
       reply_parameters: {
@@ -722,19 +811,21 @@ async function closePoll(
   );
 }
 
-async function handlePollAnswer(answer) {
-  const poll = state.polls[answer.poll_id];
+async function handlePollAnswer(app, answer) {
+  const poll = await getPoll(app.db, answer.poll_id);
 
   if (!poll || poll.closed || !answer.user) return;
 
-  const event = state.events[poll.eventId] || { quorumCount: 3 };
+  const event = await getEvent(app.db, poll.eventId);
+  const quorumCount = event ? event.quorumCount : 3;
   const userKey = String(answer.user.id);
   const selectedOptionId = answer.option_ids[0];
 
   if (selectedOptionId === undefined) {
+    await removeVote(app.db, poll.pollId, userKey);
     delete poll.selections[userKey];
   } else {
-    poll.selections[userKey] = {
+    const vote = {
       optionId: selectedOptionId,
       displayName: [
         answer.user.first_name,
@@ -744,16 +835,20 @@ async function handlePollAnswer(answer) {
         .join(" "),
       updatedAt: new Date().toISOString(),
     };
+
+    await upsertVote(app.db, poll.pollId, userKey, vote);
+    poll.selections[userKey] = vote;
   }
 
   const yes = yesCount(poll);
   const nextQuorumState =
-    yes >= event.quorumCount ? "reached" : "below";
+    yes >= quorumCount ? "reached" : "below";
 
   if (nextQuorumState !== poll.quorumState) {
-    poll.quorumState = nextQuorumState;
+    await setPollQuorumState(app.db, poll.pollId, nextQuorumState);
 
     await send(
+      app,
       poll.chatId,
       nextQuorumState === "reached"
         ? `✅ Кворум набран: подтвердили участие ${yes} ${pluralizeRu(
@@ -762,7 +857,7 @@ async function handlePollAnswer(answer) {
             "человека",
             "человек",
           )}.`
-        : `⚠️ Кворум снова не набран: подтвердили участие ${yes} из ${event.quorumCount}.`,
+        : `⚠️ Кворум снова не набран: подтвердили участие ${yes} из ${quorumCount}.`,
       {
         ...topicPayload(poll.messageThreadId),
         reply_parameters: {
@@ -772,38 +867,38 @@ async function handlePollAnswer(answer) {
       },
     );
   }
-
-  save();
 }
 
-async function handleCallback(query) {
+async function handleCallback(app, query) {
   const data = query.data || "";
   const message = query.message;
   const user = query.from;
 
-  const manager = await isManager(message.chat.id, user.id);
+  const manager = await isManager(app, message.chat.id, user.id);
 
   if (data === "ev:list") {
-    await answerCallback(query.id);
-    return showList(message, manager, true);
+    await answerCallback(app, query.id);
+    return showList(app, message, manager, true);
   }
 
   if (data === "ev:add") {
     if (!manager) {
       return answerCallback(
+        app,
         query.id,
         "Добавлять мероприятия могут только администраторы.",
         true,
       );
     }
 
-    await answerCallback(query.id);
-    return askEventType(message);
+    await answerCallback(app, query.id);
+    return askEventType(app, message);
   }
 
   if (data.startsWith("ev:createtype:")) {
     if (!manager) {
       return answerCallback(
+        app,
         query.id,
         "Добавлять мероприятия могут только администраторы.",
         true,
@@ -812,16 +907,59 @@ async function handleCallback(query) {
 
     const eventType = data.split(":")[2];
 
-    await answerCallback(query.id);
-    return startCreate(message, eventType, user.id);
+    await answerCallback(app, query.id);
+    return startCreate(app, message, eventType, user);
+  }
+
+  // Create-wizard timezone step (button-driven). Handled before the generic
+  // event lookup below because no event exists yet. The session key
+  // (chatId:userId) scopes the action to the wizard owner.
+  if (data.startsWith("wiz:tz:")) {
+    const choice = data.slice("wiz:tz:".length);
+    const key = sessionKey(message.chat.id, user.id);
+    const session = await getSession(app.db, key);
+
+    if (!session || session.mode !== "create" || session.field !== "timezone") {
+      return answerCallback(app, query.id, "Шаг уже неактуален.", true);
+    }
+
+    if (choice === "other") {
+      await answerCallback(app, query.id);
+      // Drop the keyboard and wait for a typed IANA zone (handleSessionMessage).
+      await telegram(app.config.botToken, "editMessageText", {
+        chat_id: message.chat.id,
+        message_id: message.message_id,
+        text: "Впиши свой часовой пояс (IANA), например Asia/Almaty:",
+      });
+      return null;
+    }
+
+    let value;
+    try {
+      value = assertTimezone(choice);
+    } catch {
+      return answerCallback(app, query.id, "Неизвестный пояс.", true);
+    }
+
+    await answerCallback(app, query.id);
+    return recordAnswerAndContinue(
+      app,
+      session,
+      key,
+      message.chat.id,
+      session.threadId,
+      user,
+      value,
+    );
   }
 
   const parts = data.split(":");
   const eventId = parts[2];
-  const event = state.events[eventId];
+  const event = await getEvent(app.db, eventId);
 
-  if (!event) {
+  if (!event || String(event.chatId) !== String(message.chat.id)) {
     return answerCallback(
+      app,
       query.id,
       "Мероприятие не найдено.",
       true,
@@ -829,12 +967,13 @@ async function handleCallback(query) {
   }
 
   if (data.startsWith("ev:view:")) {
-    await answerCallback(query.id);
-    return showEvent(message, event, manager);
+    await answerCallback(app, query.id);
+    return showEvent(app, message, event, manager);
   }
 
   if (!manager) {
     return answerCallback(
+      app,
       query.id,
       "Редактировать мероприятия могут только администраторы.",
       true,
@@ -842,14 +981,15 @@ async function handleCallback(query) {
   }
 
   if (data.startsWith("ev:edit:")) {
-    await answerCallback(query.id);
-    return startEdit(message, event, parts[3], user.id);
+    await answerCallback(app, query.id);
+    return startEdit(app, message, event, parts[3], user);
   }
 
   if (data.startsWith("ev:typeask:")) {
-    await answerCallback(query.id);
+    await answerCallback(app, query.id);
 
     return editMenu(
+      app,
       message,
       `Выбери тип мероприятия «${event.title}»:`,
       [
@@ -866,54 +1006,113 @@ async function handleCallback(query) {
     const targetType = parts[3];
 
     if (targetType === event.type) {
-      await answerCallback(query.id, "Тип уже выбран.");
-      return showEvent(message, event, true);
+      await answerCallback(app, query.id, "Тип уже выбран.");
+      return showEvent(app, message, event, true);
     }
 
     if (targetType === EVENT_TYPES.ONE_TIME) {
-      event.type = EVENT_TYPES.ONE_TIME;
-      event.intervalDays = null;
-      event.updatedAt = new Date().toISOString();
+      const updated = {
+        ...event,
+        type: EVENT_TYPES.ONE_TIME,
+        intervalDays: null,
+        updatedAt: new Date().toISOString(),
+      };
 
-      save();
+      await updateEventFields(app.db, event.id, {
+        type: updated.type,
+        intervalDays: updated.intervalDays,
+        updatedAt: updated.updatedAt,
+      });
 
-      await answerCallback(query.id, "Тип изменён.");
-      return showEvent(message, event, true);
+      await answerCallback(app, query.id, "Тип изменён.");
+      return showEvent(app, message, updated, true);
     }
 
     if (targetType === EVENT_TYPES.RECURRING) {
-      await answerCallback(query.id);
+      await answerCallback(app, query.id);
       return startChangeTypeToRecurring(
+        app,
         message,
         event,
-        user.id,
+        user,
       );
     }
 
     return answerCallback(
+      app,
       query.id,
       "Неизвестный тип мероприятия.",
       true,
     );
   }
 
+  if (data.startsWith("ev:tzask:")) {
+    await answerCallback(app, query.id);
+
+    return editMenu(
+      app,
+      message,
+      `Выбери часовой пояс для «${event.title}»:`,
+      [
+        ...timezoneKeyboardRows(
+          (id) => `ev:settz:${event.id}:${id}`,
+          event.timezone,
+        ),
+        [["🌍 Другой часовой пояс", `ev:edit:${event.id}:timezone`]],
+        [["← Назад", `ev:view:${event.id}`]],
+      ],
+    );
+  }
+
+  if (data.startsWith("ev:settz:")) {
+    const tz = parts.slice(3).join(":");
+
+    let value;
+    try {
+      value = assertTimezone(tz);
+    } catch {
+      return answerCallback(app, query.id, "Неизвестный пояс.", true);
+    }
+
+    const updated = {
+      ...event,
+      timezone: value,
+      updatedAt: new Date().toISOString(),
+    };
+
+    await updateEventFields(app.db, event.id, {
+      timezone: value,
+      updatedAt: updated.updatedAt,
+    });
+
+    await answerCallback(app, query.id, "Часовой пояс изменён.");
+    return showEvent(app, message, updated, true);
+  }
+
   if (data.startsWith("ev:toggle:")) {
-    event.active = !event.active;
-    event.updatedAt = new Date().toISOString();
+    const updated = {
+      ...event,
+      active: !event.active,
+      updatedAt: new Date().toISOString(),
+    };
 
-    save();
+    await updateEventFields(app.db, event.id, {
+      active: updated.active,
+      updatedAt: updated.updatedAt,
+    });
 
-    await answerCallback(query.id);
-    return showEvent(message, event, true);
+    await answerCallback(app, query.id);
+    return showEvent(app, message, updated, true);
   }
 
   if (data.startsWith("ev:test:")) {
-    await answerCallback(query.id, "Публикую тестовое голосование…");
+    await answerCallback(app, query.id, "Публикую тестовое голосование…");
 
     try {
-      await publishPoll(event, { manual: true });
+      await publishPoll(app, event, { manual: true });
     } catch (error) {
       return send(
+        app,
         message.chat.id,
         `Не удалось опубликовать голосование: ${error.message}`,
         topicPayload(message.message_thread_id),
@@ -924,9 +1123,10 @@ async function handleCallback(query) {
   }
 
   if (data.startsWith("ev:deleteask:")) {
-    await answerCallback(query.id);
+    await answerCallback(app, query.id);
 
     return editMenu(
+      app,
       message,
       `Удалить мероприятие «${event.title}»? Это действие нельзя отменить.`,
       [
@@ -939,15 +1139,14 @@ async function handleCallback(query) {
   }
 
   if (data.startsWith("ev:delete:")) {
-    delete state.events[event.id];
+    await deleteEvent(app.db, event.id);
 
-    save();
-
-    await answerCallback(query.id, "Мероприятие удалено.");
-    return showList(message, true, true);
+    await answerCallback(app, query.id, "Мероприятие удалено.");
+    return showList(app, message, true, true);
   }
 
   return answerCallback(
+    app,
     query.id,
     "Неизвестное действие.",
     true,
@@ -962,16 +1161,17 @@ function command(message) {
     : null;
 }
 
-async function handleMessage(message) {
-  if (await handleSessionMessage(message)) return;
+async function handleMessage(app, message) {
+  if (await handleSessionMessage(app, message)) return;
 
   const currentCommand = command(message);
   if (!currentCommand) return;
 
   if (currentCommand === "/cancel") {
-    sessions.delete(sessionKey(message.chat.id, message.from.id));
+    await clearSession(app.db, sessionKey(message.chat.id, message.from.id));
 
     return send(
+      app,
       message.chat.id,
       "Текущий ввод отменён.",
       topicPayload(message.message_thread_id),
@@ -980,6 +1180,7 @@ async function handleMessage(message) {
 
   if (currentCommand === "/chatid") {
     return send(
+      app,
       message.chat.id,
       `chat_id: ${message.chat.id}\nmessage_thread_id: ${
         message.message_thread_id || "не используется"
@@ -990,6 +1191,7 @@ async function handleMessage(message) {
 
   if (currentCommand === "/whoami") {
     return send(
+      app,
       message.chat.id,
       `user_id: ${message.from.id}`,
       topicPayload(message.message_thread_id),
@@ -998,6 +1200,7 @@ async function handleMessage(message) {
 
   if (currentCommand === "/version") {
     return send(
+      app,
       message.chat.id,
       `${APP_NAME} v${APP_VERSION}`,
       topicPayload(message.message_thread_id),
@@ -1006,31 +1209,34 @@ async function handleMessage(message) {
 
   if (currentCommand === "/events") {
     const manager = await isManager(
+      app,
       message.chat.id,
       message.from.id,
     );
 
-    return showList(message, manager);
+    return showList(app, message, manager);
   }
 
   if (currentCommand === "/addevent") {
     if (
-      !(await isManager(message.chat.id, message.from.id))
+      !(await isManager(app, message.chat.id, message.from.id))
     ) {
       return send(
+        app,
         message.chat.id,
         "Добавлять мероприятия могут только администраторы группы или владелец бота.",
         topicPayload(message.message_thread_id),
       );
     }
 
-    return askEventType(message);
+    return askEventType(app, message);
   }
 
   if (currentCommand === "/schedule") {
-    const events = schedulableEventsForChat(message.chat.id);
+    const events = await schedulableEventsForChat(app, message.chat.id);
 
     return send(
+      app,
       message.chat.id,
       events.length
         ? events.map((event) => formatEvent(event)).join(
@@ -1042,20 +1248,19 @@ async function handleMessage(message) {
   }
 
   if (currentCommand === "/status") {
-    const polls = Object.values(state.polls)
-      .filter(
-        (poll) =>
-          !poll.closed &&
-          String(poll.chatId) === String(message.chat.id),
-      )
-      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    const polls = await getOpenPollsForChat(app.db, message.chat.id);
+
+    const lines = [];
+    for (const poll of polls) {
+      const event = await getEvent(app.db, poll.eventId);
+      lines.push(pollStatus(poll, event));
+    }
 
     return send(
+      app,
       message.chat.id,
       polls.length
-        ? polls.map((poll) => pollStatus(poll)).join(
-            "\n\n──────────\n\n",
-          )
+        ? lines.join("\n\n──────────\n\n")
         : "Сейчас нет открытых голосований.",
       topicPayload(message.message_thread_id),
     );
@@ -1063,22 +1268,24 @@ async function handleMessage(message) {
 
   if (currentCommand === "/publish") {
     if (
-      !(await isManager(message.chat.id, message.from.id))
+      !(await isManager(app, message.chat.id, message.from.id))
     ) {
       return send(
+        app,
         message.chat.id,
         "Команда доступна только администраторам.",
         topicPayload(message.message_thread_id),
       );
     }
 
-    const events = schedulableEventsForChat(message.chat.id);
+    const events = await schedulableEventsForChat(app, message.chat.id);
 
     if (events.length === 1) {
-      return publishPoll(events[0], { manual: true });
+      return publishPoll(app, events[0], { manual: true });
     }
 
     return send(
+      app,
       message.chat.id,
       events.length
         ? "Выбери мероприятие для тестового голосования:"
@@ -1100,26 +1307,22 @@ async function handleMessage(message) {
 
   if (currentCommand === "/closepoll") {
     if (
-      !(await isManager(message.chat.id, message.from.id))
+      !(await isManager(app, message.chat.id, message.from.id))
     ) {
       return send(
+        app,
         message.chat.id,
         "Команда доступна только администраторам.",
         topicPayload(message.message_thread_id),
       );
     }
 
-    const poll = Object.values(state.polls)
-      .filter(
-        (item) =>
-          !item.closed &&
-          String(item.chatId) === String(message.chat.id),
-      )
-      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
+    const [poll] = await getOpenPollsForChat(app.db, message.chat.id);
 
     return poll
-      ? closePoll(poll, "Голосование закрыто вручную.")
+      ? closePoll(app, poll, "Голосование закрыто вручную.")
       : send(
+          app,
           message.chat.id,
           "Сейчас нет открытых голосований.",
           topicPayload(message.message_thread_id),
@@ -1128,6 +1331,7 @@ async function handleMessage(message) {
 
   if (["/help", "/start"].includes(currentCommand)) {
     return send(
+      app,
       message.chat.id,
       [
         "Сборум помогает собирать кворум на мероприятия.",
@@ -1147,15 +1351,9 @@ async function handleMessage(message) {
   }
 }
 
-async function schedulerTick() {
-  if (schedulerBusy) return;
-
-  schedulerBusy = true;
-
-  try {
-    for (const event of Object.values(state.events).filter(
-      (item) => item.active,
-    )) {
+async function schedulerTick(app) {
+  for (const event of await getActiveEvents(app.db)) {
+    try {
       const local = getLocalParts(new Date(), event.timezone);
       const today = dateKey(local);
       const publishTime = parseTime(event.publishTime);
@@ -1170,80 +1368,85 @@ async function schedulerTick() {
         eventStartDate: event.startDate,
         intervalDays: event.intervalDays,
         publishDaysBefore: event.publishDaysBefore,
-        alreadyPublishedEventDates: publishedDates(event),
+        alreadyPublishedEventDates: await getPublishedDates(app.db, event.id),
       });
 
       if (eventDate) {
-        await publishPoll(event, { eventDate });
-      }
-    }
-
-    for (const poll of Object.values(state.polls)) {
-      if (
-        !poll.closed &&
-        Date.parse(poll.closeAt) <= Date.now()
-      ) {
-        await closePoll(poll);
-      }
-    }
-  } catch (error) {
-    console.error("scheduler:", error);
-  } finally {
-    schedulerBusy = false;
-  }
-}
-
-async function pollingLoop() {
-  while (true) {
-    try {
-      const updates = await telegram("getUpdates", {
-        offset: updateOffset,
-        timeout: 50,
-        allowed_updates: [
-          "message",
-          "poll_answer",
-          "callback_query",
-        ],
-      });
-
-      for (const update of updates) {
-        updateOffset = update.update_id + 1;
-
-        if (update.poll_answer) {
-          await handlePollAnswer(update.poll_answer);
-        }
-
-        if (update.callback_query) {
-          await handleCallback(update.callback_query);
-        }
-
-        if (update.message) {
-          await handleMessage(update.message);
-        }
+        await publishPoll(app, event, { eventDate });
       }
     } catch (error) {
-      console.error("polling:", error.message);
-      await new Promise((resolve) => setTimeout(resolve, 3_000));
+      console.error(`scheduler event ${event.id}:`, error);
     }
+  }
+
+  const nowIso = new Date().toISOString();
+  for (const poll of await getOpenPollsDuePastClose(app.db, nowIso)) {
+    try {
+      await closePoll(app, poll);
+    } catch (error) {
+      console.error(`scheduler close ${poll.pollId}:`, error);
+    }
+  }
+
+  await clearStaleSessions(
+    app.db,
+    new Date(Date.now() - SESSION_TTL_MS).toISOString(),
+  );
+}
+
+async function routeUpdate(app, update) {
+  if (update.poll_answer) {
+    await handlePollAnswer(app, update.poll_answer);
+  }
+
+  if (update.callback_query) {
+    await handleCallback(app, update.callback_query);
+  }
+
+  if (update.message) {
+    await handleMessage(app, update.message);
   }
 }
 
-async function main() {
-  const me = await telegram("getMe");
+export default {
+  async fetch(request, env, ctx) {
+    if (request.method !== "POST") {
+      return new Response(`${APP_NAME} v${APP_VERSION}`, { status: 200 });
+    }
 
-  console.log(
-    `${APP_NAME} v${APP_VERSION}: @${me.username} started; events=${Object.keys(
-      state.events,
-    ).length}`,
-  );
+    const app = createApp(env);
 
-  await schedulerTick();
-  setInterval(schedulerTick, 20_000);
+    if (
+      !app.config.webhookSecret ||
+      request.headers.get("X-Telegram-Bot-Api-Secret-Token") !==
+        app.config.webhookSecret
+    ) {
+      return new Response("forbidden", { status: 403 });
+    }
 
-  await pollingLoop();
-}
+    let update;
+    try {
+      update = await request.json();
+    } catch {
+      return new Response("bad request", { status: 400 });
+    }
 
-main().catch((error) => {
-  console.error(error);
-  process.exit(1);
-});
+    ctx.waitUntil(
+      routeUpdate(app, update).catch((error) =>
+        console.error("update:", error),
+      ),
+    );
+
+    return new Response("ok", { status: 200 });
+  },
+
+  async scheduled(event, env, ctx) {
+    const app = createApp(env);
+
+    ctx.waitUntil(
+      schedulerTick(app).catch((error) =>
+        console.error("scheduler:", error),
+      ),
+    );
+  },
+};

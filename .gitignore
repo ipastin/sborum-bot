@@ -4,3 +4,9 @@ data/*.tmp
 backups/
 node_modules/
 .DS_Store
+
+# Cloudflare Workers / Wrangler
+.wrangler/
+.dev.vars
+seed.sql
+wipe-test-data.sql

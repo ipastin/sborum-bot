@@ -2,10 +2,28 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   EVENT_TYPES,
+  formatDateRu,
   formatRelativeDateRu,
   getNextEventDate,
   getScheduledEventDate,
+  parseDateInput,
 } from "../src/schedule.js";
+
+test("formatDateRu renders DD.MM.YY", () => {
+  assert.equal(formatDateRu("2026-06-18"), "18.06.26");
+  assert.equal(formatDateRu("2026-01-05"), "05.01.26");
+});
+
+test("parseDateInput accepts DD.MM.YYYY and DD.MM.YY, returns ISO", () => {
+  assert.equal(parseDateInput("18.06.2026"), "2026-06-18");
+  assert.equal(parseDateInput("18.06.26"), "2026-06-18");
+  assert.equal(parseDateInput("8.6.26"), "2026-06-08");
+});
+
+test("parseDateInput rejects ISO format and impossible dates", () => {
+  assert.throws(() => parseDateInput("2026-06-18"), /ДД\.ММ\.ГГГГ/);
+  assert.throws(() => parseDateInput("30.02.2026"), /такой календарной даты не существует/);
+});
 
 test("relative words: today, tomorrow, day after tomorrow, through N days", () => {
   assert.equal(formatRelativeDateRu({ fromDate: "2026-06-10", eventDate: "2026-06-10" }), "сегодня");
@@ -57,4 +75,60 @@ test("recurring event keeps publishing every interval", () => {
     publishDaysBefore: 2,
     alreadyPublishedEventDates: ["2026-06-11"],
   }), "2026-06-25");
+});
+
+test("does not publish before the publish time", () => {
+  assert.equal(getScheduledEventDate({
+    eventType: EVENT_TYPES.ONE_TIME,
+    today: "2026-06-16",
+    currentHour: 11,
+    currentMinute: 59,
+    publishHour: 12,
+    publishMinute: 0,
+    eventStartDate: "2026-06-18",
+    publishDaysBefore: 2,
+  }), null);
+});
+
+test("a late tick after the publish time still publishes (catch-up)", () => {
+  const lateTick = {
+    eventType: EVENT_TYPES.ONE_TIME,
+    today: "2026-06-16",
+    currentHour: 12,
+    currentMinute: 5,
+    publishHour: 12,
+    publishMinute: 0,
+    eventStartDate: "2026-06-18",
+    publishDaysBefore: 2,
+  };
+
+  assert.equal(getScheduledEventDate(lateTick), "2026-06-18");
+  assert.equal(
+    getScheduledEventDate({ ...lateTick, alreadyPublishedEventDates: ["2026-06-18"] }),
+    null,
+  );
+});
+
+test("a late tick publishes the recurring occurrence and dedups", () => {
+  const lateTick = {
+    eventType: EVENT_TYPES.RECURRING,
+    today: "2026-06-23",
+    currentHour: 12,
+    currentMinute: 30,
+    publishHour: 12,
+    publishMinute: 0,
+    eventStartDate: "2026-06-11",
+    intervalDays: 14,
+    publishDaysBefore: 2,
+    alreadyPublishedEventDates: ["2026-06-11"],
+  };
+
+  assert.equal(getScheduledEventDate(lateTick), "2026-06-25");
+  assert.equal(
+    getScheduledEventDate({
+      ...lateTick,
+      alreadyPublishedEventDates: ["2026-06-11", "2026-06-25"],
+    }),
+    null,
+  );
 });
