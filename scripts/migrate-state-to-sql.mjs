@@ -26,7 +26,11 @@ function row(values) {
   return `(${values.map(q).join(", ")})`;
 }
 
-const lines = ["PRAGMA foreign_keys = OFF;", "BEGIN;"];
+// No explicit BEGIN/COMMIT: remote D1 rejects SQL transaction statements
+// (`wrangler d1 execute --file` already runs the batch atomically). Statements
+// are emitted parent-before-child (events → polls → poll_votes → published)
+// so foreign keys are satisfied without disabling them.
+const lines = [];
 
 for (const event of Object.values(events)) {
   lines.push(
@@ -109,8 +113,6 @@ for (const [key, value] of Object.entries(publishedEvents)) {
       ";",
   );
 }
-
-lines.push("COMMIT;", "PRAGMA foreign_keys = ON;");
 
 const voteCount = Object.values(polls).reduce(
   (total, poll) => total + Object.keys(poll.selections || {}).length,

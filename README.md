@@ -28,17 +28,20 @@
 Пожалуйста, отметь актуальный вариант в голосовании ниже.
 ```
 
-## Установка на VPS
+## Развёртывание
 
-Подробная инструкция находится в каталоге `docs/`.
+Бот работает на **Cloudflare Workers** (webhook + D1 + Cron Trigger). Подробный
+рунбук — в [`docs/cloudflare-deploy.md`](docs/cloudflare-deploy.md).
 
 Кратко:
 
 ```bash
-sudo bash scripts/install-systemd.sh
-sudo nano /etc/sborum-bot/sborum-bot.env
-sudo systemctl enable --now sborum-bot
-sudo systemctl status sborum-bot --no-pager
+npm install
+npm run d1:migrate                              # применить схему к базе D1
+npx wrangler secret put BOT_TOKEN               # токен от @BotFather
+npx wrangler secret put TELEGRAM_WEBHOOK_SECRET # длинная случайная строка
+npm run deploy
+node scripts/set-webhook.mjs <BOT_TOKEN> https://sborum-bot.<субдомен>.workers.dev/ <TELEGRAM_WEBHOOK_SECRET>
 ```
 
 ## Команды Telegram
