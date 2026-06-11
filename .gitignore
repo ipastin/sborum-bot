@@ -10,3 +10,10 @@ node_modules/
 .dev.vars
 seed.sql
 wipe-test-data.sql
+
+# AI tooling artifacts
+.codegraph/
+AGENTS.md
+scripts/CLAUDE.md
+src/CLAUDE.md
+systemd/CLAUDE.md
