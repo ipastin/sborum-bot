@@ -234,15 +234,29 @@ export async function insertPoll(db, poll) {
 }
 
 // Reserve the (event_id, event_date) slot BEFORE any Telegram call. The PK acts
-// as a mutex: only one caller's INSERT wins (changes === 1); overlapping or
-// double-delivered cron ticks see changes === 0 and must not publish.
-export async function claimPublish(db, eventId, eventDate, publishedAt) {
+// as a mutex: overlapping ticks cannot publish concurrently. An unfinished
+// claim may be reclaimed once after the grace period; a second ambiguous
+// failure stays blocked to cap the duplicate-poll risk.
+export async function claimPublish(
+  db,
+  eventId,
+  eventDate,
+  publishedAt,
+  staleBefore,
+) {
   const result = await db
     .prepare(
-      `INSERT OR IGNORE INTO published_events (event_id, event_date, poll_id, published_at)
-       VALUES (?,?,?,?)`,
+      `INSERT INTO published_events
+        (event_id, event_date, poll_id, published_at, attempt_count)
+       VALUES (?,?,NULL,?,1)
+       ON CONFLICT (event_id, event_date) DO UPDATE SET
+         published_at = excluded.published_at,
+         attempt_count = published_events.attempt_count + 1
+       WHERE published_events.poll_id IS NULL
+         AND published_events.attempt_count < 2
+         AND published_events.published_at <= ?`,
     )
-    .bind(eventId, eventDate, null, publishedAt)
+    .bind(eventId, eventDate, publishedAt, staleBefore)
     .run();
 
   return result.meta.changes === 1;
@@ -313,7 +327,9 @@ export async function removeVote(db, pollId, userId) {
 
 export async function getPublishedDates(db, eventId) {
   const { results } = await db
-    .prepare("SELECT event_date FROM published_events WHERE event_id = ?")
+    .prepare(
+      "SELECT event_date FROM published_events WHERE event_id = ? AND poll_id IS NOT NULL",
+    )
     .bind(eventId)
     .all();
   return results.map((row) => row.event_date);

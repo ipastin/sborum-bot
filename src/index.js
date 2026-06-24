@@ -45,9 +45,10 @@ import {
 } from "./store.js";
 
 const APP_NAME = "sborum-bot";
-const APP_VERSION = "3.0.3";
+const APP_VERSION = "3.0.4";
 
 const SESSION_TTL_MS = 24 * 3_600_000;
+const PUBLISH_CLAIM_STALE_MS = 5 * 60_000;
 
 // `app` bundles the per-request dependencies (D1 binding + config) that flow
 // through every handler, replacing the module-level globals the VPS build used.
@@ -378,21 +379,29 @@ function promptFor(field, eventType) {
   return prompts[field];
 }
 
-// Build a wizard prompt that mentions the asked user. Telegram force-reply is
-// unreliable in groups (it does not auto-engage across clients, and `selective`
-// only targets @username mentions, not text_mention by id), so we do not rely
-// on it. Instead the bot reads the user's next plain message (see
-// handleSessionMessage) — which requires the bot's group privacy mode to be
-// OFF. The mention makes it clear whose turn it is and pings them.
-function mentionPrompt(user, body) {
+// Build a wizard prompt that mentions the asked user and requests a direct
+// reply, so Telegram delivers the answer even when group privacy mode is ON.
+// handleSessionMessage also accepts the user's next plain message when privacy
+// mode is OFF, covering clients that do not auto-engage ForceReply.
+export function mentionPrompt(user, body, { forceReply = true } = {}) {
   const name = (user?.first_name || "Участник").trim() || "Участник";
 
   return {
-    text: `${name}, ${body}`,
+    text: forceReply
+      ? `${name}, ${body}\n\nОтветь на это сообщение.`
+      : `${name}, ${body}`,
     extra: {
       entities: [
         { type: "text_mention", offset: 0, length: name.length, user: { id: user.id } },
       ],
+      ...(forceReply
+        ? {
+            reply_markup: {
+              force_reply: true,
+              input_field_placeholder: "Ответь на это сообщение",
+            },
+          }
+        : {}),
     },
   };
 }
@@ -405,6 +414,7 @@ async function ask(app, session, field, chatId, threadId, user) {
   const { text, extra } = mentionPrompt(
     user,
     isCreateTimezone ? "Выбери часовой пояс:" : promptFor(field, session.eventType),
+    { forceReply: !isCreateTimezone },
   );
 
   const replyMarkup = isCreateTimezone
@@ -660,7 +670,13 @@ async function publishPoll(
   // and returns without posting a duplicate poll.
   if (
     !manual &&
-    !(await claimPublish(app.db, event.id, selectedDate, createdAt))
+    !(await claimPublish(
+      app.db,
+      event.id,
+      selectedDate,
+      createdAt,
+      new Date(Date.now() - PUBLISH_CLAIM_STALE_MS).toISOString(),
+    ))
   ) {
     return;
   }
