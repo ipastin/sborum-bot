@@ -45,9 +45,10 @@ import {
 } from "./store.js";
 
 const APP_NAME = "sborum-bot";
-const APP_VERSION = "3.0.3";
+const APP_VERSION = "3.0.4";
 
 const SESSION_TTL_MS = 24 * 3_600_000;
+const PUBLISH_CLAIM_STALE_MS = 5 * 60_000;
 
 // `app` bundles the per-request dependencies (D1 binding + config) that flow
 // through every handler, replacing the module-level globals the VPS build used.
@@ -660,7 +661,13 @@ async function publishPoll(
   // and returns without posting a duplicate poll.
   if (
     !manual &&
-    !(await claimPublish(app.db, event.id, selectedDate, createdAt))
+    !(await claimPublish(
+      app.db,
+      event.id,
+      selectedDate,
+      createdAt,
+      new Date(Date.now() - PUBLISH_CLAIM_STALE_MS).toISOString(),
+    ))
   ) {
     return;
   }
