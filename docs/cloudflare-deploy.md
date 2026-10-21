@@ -44,16 +44,20 @@ npm run deploy
 ```bash
 node scripts/set-webhook.mjs <ТЕСТОВЫЙ_BOT_TOKEN> https://sborum-bot.<субдомен>.workers.dev/ <TELEGRAM_WEBHOOK_SECRET>
 ```
-В выводе `getWebhookInfo` поле `url` должно совпадать с адресом Worker.
+Скрипт сохраняет ожидающие обновления при установке и удалении webhook. В выводе `getWebhookInfo` поле `url` должно совпадать с адресом Worker.
 
 ## 7. Проверка на тестовом боте
 Проверь на тестовом боте: `/version`, `/events`, `/addevent`,
 публикация по таймеру (поставь время на ближайшую минуту), голосование, кворум,
-закрытие опроса.
+закрытие опроса. Для проверки очереди создай открытый poll, сними тестовый webhook командой `node scripts/set-webhook.mjs <ТЕСТОВЫЙ_BOT_TOKEN> --delete`, оставь несколько ответов и снова выполни команду из шага 6. Проверь `/status` и сообщение о кворуме. Для повторной проверки очереди без смены webhook вызови `curl -fsS "https://api.telegram.org/bot${BOT_TOKEN}/getWebhookInfo"` (с тестовым токеном в переменной `BOT_TOKEN`): `pending_update_count` должен снизиться до нуля.
 
 ## 8. Перенос данных с VPS (когда тест прошёл)
+Сначала сними webhook тестового бота командой `node scripts/set-webhook.mjs <ТЕСТОВЫЙ_BOT_TOKEN> --delete`. Останови основной VPS-бот **до** финального копирования `state.json`: ответы, обработанные им после снимка, не попадут в D1 и уже не будут ждать в очереди Telegram.
 ```bash
-# на VPS скопируй рабочий файл состояния к себе, например:
+# на VPS останови основного бота:
+sudo systemctl stop sborum-bot
+
+# скопируй финальный файл состояния к себе, например:
 scp пользователь@сервер:/var/lib/sborum-bot/state.json ./data/state.json
 
 # сгенерируй SQL и залей в облачную базу:
@@ -70,13 +74,10 @@ npx wrangler d1 execute sborum-bot --remote --command \
 # 1) положи НАСТОЯЩИЙ токен основного бота в секрет:
 npx wrangler secret put BOT_TOKEN
 
-# 2) останови бота на VPS (там, на сервере):
-sudo systemctl stop sborum-bot
-
-# 3) привяжи webhook основного бота к Worker:
+# 2) привяжи webhook основного бота к Worker:
 node scripts/set-webhook.mjs <ОСНОВНОЙ_BOT_TOKEN> https://sborum-bot.<субдомен>.workers.dev/ <TELEGRAM_WEBHOOK_SECRET>
 ```
-Проверь «вживую»: напиши боту `/version`, создай тестовое мероприятие.
+Проверь «вживую»: напиши боту `/version`, создай тестовое мероприятие. Сверь `pending_update_count` в выводе скрипта и повторно через `curl -fsS "https://api.telegram.org/bot${BOT_TOKEN}/getWebhookInfo"` (с основным токеном в переменной `BOT_TOKEN`); очередь должна уменьшаться до нуля. Проверь накопившиеся ответы через `/status` у перенесённого открытого poll.
 
 ## Откат (если что-то не так)
 ```bash
@@ -84,6 +85,7 @@ node scripts/set-webhook.mjs <ОСНОВНОЙ_BOT_TOKEN> https://sborum-bot.<с
 node scripts/set-webhook.mjs <ОСНОВНОЙ_BOT_TOKEN> --delete   # снять webhook
 sudo systemctl start sborum-bot                              # снова long-polling на VPS
 ```
+Удаление webhook сохраняет ожидающие обновления. После запуска VPS проверь, что бот обрабатывает накопившиеся ответы, и сверь `/status` с голосами в открытом poll.
 VPS держим запасным 1–2 недели. После стабильной работы — вывод VPS и удаление
 файлов развёртывания (`Dockerfile`, `compose.yaml`, `systemd/`, `scripts/*-systemd.sh`).
 
