@@ -31,9 +31,11 @@ test("webhook changes preserve pending updates and subscribe to poll answers", a
   assert.equal(calls[2].body.drop_pending_updates, false);
 });
 
-test("concurrent queued answers update quorum once and later retractions lower it", async () => {
+test("queued answers keep correct quorum through overlap, retries, and notice failure", async () => {
   const originalFetch = globalThis.fetch;
+  const originalError = console.error;
   const messages = [];
+  let failNextMessage = false;
   const votes = new Map();
   const poll = {
     poll_id: "poll-1", event_id: "event-1", message_id: 17, chat_id: "-1001",
@@ -92,6 +94,10 @@ test("concurrent queued answers update quorum once and later retractions lower i
   };
 
   globalThis.fetch = async (_url, options) => {
+    if (failNextMessage) {
+      failNextMessage = false;
+      return { json: async () => ({ ok: false, description: "temporary send failure" }) };
+    }
     messages.push(JSON.parse(options.body).text);
     return { json: async () => ({ ok: true, result: {} }) };
   };
@@ -125,8 +131,17 @@ test("concurrent queued answers update quorum once and later retractions lower i
     assert.equal(votes.size, 1);
     assert.equal(poll.quorum_state, "below");
     assert.equal(messages.filter((text) => text.startsWith("⚠️ Кворум снова не набран")).length, 1);
+
+    failNextMessage = true;
+    console.error = () => {};
+    await deliver({ poll_id: "poll-1", user: { id: 1, first_name: "Первый" }, option_ids: [0] });
+    await deliver({ poll_id: "poll-1", user: { id: 3, first_name: "Третий" }, option_ids: [0] });
+    assert.equal(votes.size, 3);
+    assert.equal(poll.quorum_state, "reached");
+    assert.equal(messages.filter((text) => text.startsWith("✅ Кворум набран")).length, 1);
   } finally {
     globalThis.fetch = originalFetch;
+    console.error = originalError;
   }
 });
 
