@@ -44,7 +44,7 @@ npm run deploy
 ```bash
 node scripts/set-webhook.mjs <ТЕСТОВЫЙ_BOT_TOKEN> https://sborum-bot.<субдомен>.workers.dev/ <TELEGRAM_WEBHOOK_SECRET>
 ```
-Скрипт сохраняет ожидающие обновления при установке и удалении webhook. В выводе `getWebhookInfo` поле `url` должно совпадать с адресом Worker.
+Скрипт сохраняет ожидающие обновления при установке и удалении webhook и ограничивает доставку одним соединением: при большом backlog обработка будет медленнее. В выводе `getWebhookInfo` поле `url` должно совпадать с адресом Worker.
 
 ## 7. Проверка на тестовом боте
 Проверь на тестовом боте: `/version`, `/events`, `/addevent`,
