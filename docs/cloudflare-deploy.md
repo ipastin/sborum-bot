@@ -1,11 +1,11 @@
 # Развёртывание на Cloudflare Workers
 
-Пошаговый рунбук переезда с VPS на Cloudflare Workers. Команды можно копировать как есть.
+Пошаговый рунбук переезда с VPS на Cloudflare Workers. Перед запуском команд создай свои Cloudflare и Telegram ресурсы и проверь значения в `wrangler.jsonc`.
 
 ## 0. Что нужно один раз
 - Аккаунт Cloudflare (бесплатный план): https://dash.cloudflare.com/sign-up
 - Тестовый бот в Телеграме: `@BotFather` → `/newbot` → сохрани **тестовый** токен.
-- Установленные зависимости: `npm install` (ставит `wrangler`).
+- Установленные зависимости: `npm ci` (ставит `wrangler` по `package-lock.json`).
 
 ## 1. Вход в Cloudflare
 ```bash
@@ -16,8 +16,7 @@ npx wrangler login
 ```bash
 npx wrangler d1 create sborum-bot
 ```
-Скопируй `database_id` из вывода и вставь его в `wrangler.jsonc`
-вместо `REPLACE_WITH_DATABASE_ID`.
+Скопируй `database_id` из вывода и замени им **уже указанное** значение `d1_databases[0].database_id` в `wrangler.jsonc`. ID в репозитории относится к существующей базе и не подходит для новой установки. Перед удалённой миграцией проверь, что `database_name` и `database_id` указывают на только что созданную тобой D1.
 
 ## 3. Применить схему базы (создать таблицы)
 ```bash
@@ -33,8 +32,7 @@ npm run d1:migrate
 npx wrangler secret put BOT_TOKEN
 npx wrangler secret put TELEGRAM_WEBHOOK_SECRET   # придумай длинную случайную строку
 ```
-В `wrangler.jsonc` → `vars` при необходимости укажи свой `OWNER_USER_ID`
-(числовой Telegram-id владельца) и `TIMEZONE`.
+В `wrangler.jsonc` → `vars` замени уже указанный `OWNER_USER_ID` на свой числовой Telegram-id (узнать его можно через `/whoami`). При необходимости измени `TIMEZONE`.
 
 ## 5. Опубликовать Worker
 ```bash
@@ -49,7 +47,7 @@ node scripts/set-webhook.mjs <ТЕСТОВЫЙ_BOT_TOKEN> https://sborum-bot.<с
 В выводе `getWebhookInfo` поле `url` должно совпадать с адресом Worker.
 
 ## 7. Проверка на тестовом боте
-Прогони чек-лист из раздела 8 плана: `/version`, `/events`, `/addevent`,
+Проверь на тестовом боте: `/version`, `/events`, `/addevent`,
 публикация по таймеру (поставь время на ближайшую минуту), голосование, кворум,
 закрытие опроса.
 
