@@ -12,6 +12,7 @@
 - Limit webhook delivery to one connection so queued answer changes do not overlap.
 - Count votes and change quorum state atomically when poll answers overlap.
 - Acknowledge poll answers only after processing; return a retryable error on failure.
+- Keep processing queued answers when a quorum notification fails after the vote is stored.
 
 ## 3.0.4 — fix: recover stale publish claims
 
