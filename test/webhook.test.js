@@ -124,3 +124,27 @@ test("concurrent queued answers update quorum once and later retractions lower i
     globalThis.fetch = originalFetch;
   }
 });
+
+test("failed poll answer is not acknowledged before D1 succeeds", async () => {
+  const originalError = console.error;
+  console.error = () => {};
+  try {
+    const db = {
+      prepare() {
+        return { bind() { return { first() { throw new Error("D1 unavailable"); } }; } };
+      },
+    };
+    const response = await worker.fetch(new Request("https://example.workers.dev/", {
+      method: "POST",
+      headers: { "X-Telegram-Bot-Api-Secret-Token": "secret" },
+      body: JSON.stringify({ poll_answer: {
+        poll_id: "poll-1", user: { id: 1 }, option_ids: [0],
+      } }),
+    }), { DB: db, BOT_TOKEN: "test-token", TELEGRAM_WEBHOOK_SECRET: "secret" }, {
+      waitUntil() { throw new Error("poll_answer must not be acknowledged early"); },
+    });
+    assert.equal(response.status, 503);
+  } finally {
+    console.error = originalError;
+  }
+});
