@@ -1447,11 +1447,20 @@ export default {
       return new Response("bad request", { status: 400 });
     }
 
-    ctx.waitUntil(
-      routeUpdate(app, update).catch((error) =>
-        console.error("update:", error),
-      ),
-    );
+    if (update.poll_answer) {
+      try {
+        await routeUpdate(app, update);
+      } catch (error) {
+        console.error("update:", error);
+        return new Response("retry", { status: 503 });
+      }
+    } else {
+      ctx.waitUntil(
+        routeUpdate(app, update).catch((error) =>
+          console.error("update:", error),
+        ),
+      );
+    }
 
     return new Response("ok", { status: 200 });
   },
