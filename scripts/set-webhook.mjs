@@ -42,6 +42,7 @@ try {
           url: urlOrFlag,
           secret_token: secret,
           allowed_updates: ["message", "callback_query", "poll_answer"],
+          max_connections: 1,
           drop_pending_updates: false,
         });
 
