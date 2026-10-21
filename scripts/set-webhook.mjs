@@ -37,12 +37,12 @@ async function callTelegram(method, payload) {
 try {
   const result =
     urlOrFlag === "--delete"
-      ? await callTelegram("deleteWebhook", { drop_pending_updates: true })
+      ? await callTelegram("deleteWebhook", { drop_pending_updates: false })
       : await callTelegram("setWebhook", {
           url: urlOrFlag,
           secret_token: secret,
           allowed_updates: ["message", "callback_query", "poll_answer"],
-          drop_pending_updates: true,
+          drop_pending_updates: false,
         });
 
   console.log(JSON.stringify(result, null, 2));
