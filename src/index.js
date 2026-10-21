@@ -854,25 +854,29 @@ async function handlePollAnswer(app, answer) {
 
   if (transition) {
     const yes = transition.yes_count;
-    await send(
-      app,
-      poll.chatId,
-      transition.quorum_state === "reached"
-        ? `✅ Кворум набран: подтвердили участие ${yes} ${pluralizeRu(
-            yes,
-            "человек",
-            "человека",
-            "человек",
-          )}.`
-        : `⚠️ Кворум снова не набран: подтвердили участие ${yes} из ${quorumCount}.`,
-      {
-        ...topicPayload(poll.messageThreadId),
-        reply_parameters: {
-          message_id: poll.messageId,
-          allow_sending_without_reply: true,
+    try {
+      await send(
+        app,
+        poll.chatId,
+        transition.quorum_state === "reached"
+          ? `✅ Кворум набран: подтвердили участие ${yes} ${pluralizeRu(
+              yes,
+              "человек",
+              "человека",
+              "человек",
+            )}.`
+          : `⚠️ Кворум снова не набран: подтвердили участие ${yes} из ${quorumCount}.`,
+        {
+          ...topicPayload(poll.messageThreadId),
+          reply_parameters: {
+            message_id: poll.messageId,
+            allow_sending_without_reply: true,
+          },
         },
-      },
-    );
+      );
+    } catch (error) {
+      console.error(`quorum notice ${poll.pollId}:`, error);
+    }
   }
 }
 
