@@ -4,7 +4,12 @@
 
 **updated:** 22-10-26 08-10-14 MSK
 
-**version:** 3.0.4 fix: recover stale publish claims
+**version:** 3.0.5 fix: preserve pending Telegram updates and quorum transitions
+
+## 3.0.5 — fix: preserve pending Telegram updates and quorum transitions
+
+- Keep pending Telegram updates when setting or deleting the webhook.
+- Count votes and change quorum state atomically when poll answers overlap.
 
 ## 3.0.4 — fix: recover stale publish claims
 
