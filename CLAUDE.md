@@ -53,8 +53,8 @@ invokes it. Four source files:
 
 - **`src/store.js`** — D1 repository. Every function takes the D1 binding as its first argument
   (`getEvent(db, id)`, `insertPoll(db, poll)`, `upsertVote(db, …)`, `getSession(db, key)` /
-  `setSession(db, key, …)`, …). Publishing is guarded by a claim/release mutex on the
-  `published_events` primary key (`claimPublish` / `releasePublish` / `recordPublishedPoll`) so
+  `setSession(db, key, …)`, …). Publishing is guarded by a claim/finalize mutex on the
+  `published_events` primary key (`claimPublish` / `recordPublishedPoll`) so
   overlapping cron ticks cannot post duplicate polls.
 
 ## State

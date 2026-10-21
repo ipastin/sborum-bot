@@ -262,17 +262,6 @@ export async function claimPublish(
   return result.meta.changes === 1;
 }
 
-// Roll the claim back (only if still unsent) so a later tick can retry, e.g.
-// when the Telegram send fails after the slot was claimed.
-export async function releasePublish(db, eventId, eventDate) {
-  await db
-    .prepare(
-      "DELETE FROM published_events WHERE event_id = ? AND event_date = ? AND poll_id IS NULL",
-    )
-    .bind(eventId, eventDate)
-    .run();
-}
-
 // Finalize a claimed scheduled publish: store the poll and stamp the real
 // poll_id onto the reserved dedup row, atomically.
 export async function recordPublishedPoll(db, poll) {
@@ -325,12 +314,25 @@ export async function removeVote(db, pollId, userId) {
 
 // ---- published-events dedup ----
 
-export async function getPublishedDates(db, eventId) {
+export async function getBlockedPublishDates(db, eventId) {
   const { results } = await db
     .prepare(
-      "SELECT event_date FROM published_events WHERE event_id = ? AND poll_id IS NOT NULL",
+      `SELECT event_date FROM published_events WHERE event_id = ?
+       AND (poll_id IS NOT NULL OR attempt_count >= 2)`,
     )
     .bind(eventId)
+    .all();
+  return results.map((row) => row.event_date);
+}
+
+export async function getRetryablePublishDates(db, eventId, today, staleBefore) {
+  const { results } = await db
+    .prepare(
+      `SELECT event_date FROM published_events WHERE event_id = ?
+       AND event_date >= ? AND poll_id IS NULL AND attempt_count < 2
+       AND published_at <= ? ORDER BY event_date`,
+    )
+    .bind(eventId, today, staleBefore)
     .all();
   return results.map((row) => row.event_date);
 }

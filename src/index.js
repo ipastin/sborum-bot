@@ -25,17 +25,17 @@ import {
   clearStaleSessions,
   deleteEvent,
   getActiveEvents,
+  getBlockedPublishDates,
   getEvent,
   getEventsForChat,
   getOpenPollsDuePastClose,
   getOpenPollsForChat,
   getPoll,
-  getPublishedDates,
+  getRetryablePublishDates,
   getSession,
   insertEvent,
   insertPoll,
   recordPublishedPoll,
-  releasePublish,
   removeVote,
   setPollClosed,
   setPollQuorumState,
@@ -653,7 +653,7 @@ async function handleSessionMessage(app, message) {
 async function publishPoll(
   app,
   event,
-  { manual = false, eventDate = null } = {},
+  { manual = false, eventDate = null, now = new Date() } = {},
 ) {
   const selectedDate = eventDate || nextEventDate(event);
 
@@ -663,7 +663,7 @@ async function publishPoll(
     );
   }
 
-  const createdAt = new Date().toISOString();
+  const createdAt = now.toISOString();
 
   // Scheduled publishes reserve the (event, date) slot before any Telegram
   // call. A second overlapping or double-delivered cron tick fails to claim
@@ -675,7 +675,7 @@ async function publishPoll(
       event.id,
       selectedDate,
       createdAt,
-      new Date(Date.now() - PUBLISH_CLAIM_STALE_MS).toISOString(),
+      new Date(now.getTime() - PUBLISH_CLAIM_STALE_MS).toISOString(),
     ))
   ) {
     return;
@@ -686,7 +686,7 @@ async function publishPoll(
 
   try {
     const relativeDate = formatRelativeDateRu({
-      fromDate: getToday(event),
+      fromDate: getToday(event, now),
       eventDate: selectedDate,
     });
 
@@ -726,10 +726,8 @@ async function publishPoll(
       ...topicPayload(event.messageThreadId),
     });
   } catch (error) {
-    // The poll was not posted — release the claim so a later tick can retry.
-    if (!manual) {
-      await releasePublish(app.db, event.id, selectedDate);
-    }
+    // Keep the claim: a Telegram error may follow a successful send, so only
+    // the one stale retry may post another poll.
     throw error;
   }
 
@@ -742,9 +740,7 @@ async function publishPoll(
     messageThreadId: event.messageThreadId,
     eventDate: selectedDate,
     createdAt,
-    closeAt: new Date(
-      Date.now() + event.pollDurationHours * 3_600_000,
-    ).toISOString(),
+    closeAt: new Date(now.getTime() + event.pollDurationHours * 3_600_000).toISOString(),
     closed: false,
     closedAt: null,
     quorumState: "below",
@@ -1367,12 +1363,13 @@ async function handleMessage(app, message) {
   }
 }
 
-async function schedulerTick(app) {
+export async function schedulerTick(app, now = new Date()) {
   for (const event of await getActiveEvents(app.db)) {
     try {
-      const local = getLocalParts(new Date(), event.timezone);
+      const local = getLocalParts(now, event.timezone);
       const today = dateKey(local);
       const publishTime = parseTime(event.publishTime);
+      const staleBefore = new Date(now.getTime() - PUBLISH_CLAIM_STALE_MS).toISOString();
 
       const eventDate = getScheduledEventDate({
         eventType: event.type,
@@ -1384,18 +1381,26 @@ async function schedulerTick(app) {
         eventStartDate: event.startDate,
         intervalDays: event.intervalDays,
         publishDaysBefore: event.publishDaysBefore,
-        alreadyPublishedEventDates: await getPublishedDates(app.db, event.id),
+        alreadyPublishedEventDates: await getBlockedPublishDates(app.db, event.id),
       });
 
       if (eventDate) {
-        await publishPoll(app, event, { eventDate });
+        await publishPoll(app, event, { eventDate, now });
+      }
+
+      for (const retryDate of await getRetryablePublishDates(
+        app.db, event.id, today, staleBefore,
+      )) {
+        if (retryDate !== eventDate) {
+          await publishPoll(app, event, { eventDate: retryDate, now });
+        }
       }
     } catch (error) {
       console.error(`scheduler event ${event.id}:`, error);
     }
   }
 
-  const nowIso = new Date().toISOString();
+  const nowIso = now.toISOString();
   for (const poll of await getOpenPollsDuePastClose(app.db, nowIso)) {
     try {
       await closePoll(app, poll);
@@ -1406,7 +1411,7 @@ async function schedulerTick(app) {
 
   await clearStaleSessions(
     app.db,
-    new Date(Date.now() - SESSION_TTL_MS).toISOString(),
+    new Date(now.getTime() - SESSION_TTL_MS).toISOString(),
   );
 }
 
