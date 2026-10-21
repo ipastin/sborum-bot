@@ -9,6 +9,7 @@
 ## 3.0.5 — fix: preserve pending Telegram updates and quorum transitions
 
 - Keep pending Telegram updates when setting or deleting the webhook.
+- Limit webhook delivery to one connection so queued answer changes do not overlap.
 - Count votes and change quorum state atomically when poll answers overlap.
 - Acknowledge poll answers only after processing; return a retryable error on failure.
 
