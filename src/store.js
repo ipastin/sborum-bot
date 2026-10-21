@@ -282,11 +282,23 @@ export async function setPollClosed(db, pollId, closedAt) {
     .run();
 }
 
-export async function setPollQuorumState(db, pollId, quorumState) {
-  await db
-    .prepare("UPDATE polls SET quorum_state = ? WHERE poll_id = ?")
-    .bind(quorumState, pollId)
-    .run();
+export async function syncPollQuorumState(db, pollId, quorumCount) {
+  // Count and transition in one D1 statement so concurrent answers use current votes.
+  return db
+    .prepare(
+      `WITH tally AS (
+         SELECT COUNT(*) AS yes FROM poll_votes WHERE poll_id = ? AND option_id = 0
+       ), next AS (
+         SELECT CASE WHEN yes >= ? THEN 'reached' ELSE 'below' END AS state, yes
+         FROM tally
+       )
+       UPDATE polls SET quorum_state = (SELECT state FROM next)
+       WHERE poll_id = ? AND closed = 0
+         AND quorum_state != (SELECT state FROM next)
+       RETURNING quorum_state, (SELECT yes FROM next) AS yes_count`,
+    )
+    .bind(pollId, quorumCount, pollId)
+    .first();
 }
 
 // ---- votes ----
