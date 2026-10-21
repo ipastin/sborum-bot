@@ -26,6 +26,7 @@ test("webhook changes preserve pending updates and subscribe to poll answers", a
     "setWebhook", "getWebhookInfo", "deleteWebhook", "getWebhookInfo",
   ]);
   assert.equal(calls[0].body.drop_pending_updates, false);
+  assert.equal(calls[0].body.max_connections, 1);
   assert.ok(calls[0].body.allowed_updates.includes("poll_answer"));
   assert.equal(calls[2].body.drop_pending_updates, false);
 });
