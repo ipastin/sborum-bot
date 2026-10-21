@@ -10,6 +10,7 @@
 
 - Keep pending Telegram updates when setting or deleting the webhook.
 - Count votes and change quorum state atomically when poll answers overlap.
+- Acknowledge poll answers only after processing; return a retryable error on failure.
 
 ## 3.0.4 — fix: recover stale publish claims
 
