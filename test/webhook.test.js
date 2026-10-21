@@ -116,6 +116,10 @@ test("concurrent queued answers update quorum once and later retractions lower i
     assert.equal(poll.quorum_state, "reached");
     assert.equal(messages.filter((text) => text.startsWith("✅ Кворум набран")).length, 1);
 
+    await deliver({ poll_id: "poll-1", user: { id: 2, first_name: "Второй" }, option_ids: [0] });
+    assert.equal(votes.size, 2);
+    assert.equal(messages.filter((text) => text.startsWith("✅ Кворум набран")).length, 1);
+
     await deliver({ poll_id: "poll-1", user: { id: 1, first_name: "Первый" }, option_ids: [] });
     assert.equal(votes.size, 1);
     assert.equal(poll.quorum_state, "below");
