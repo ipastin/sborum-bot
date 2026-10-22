@@ -7,6 +7,7 @@ import {
   getLocalParts,
   getNextEventDate,
   getScheduledEventDate,
+  isPublishRetryDue,
   parseTime,
   pluralizeRu,
 } from "./schedule.js";
@@ -25,17 +26,17 @@ import {
   clearStaleSessions,
   deleteEvent,
   getActiveEvents,
+  getBlockedPublishDates,
   getEvent,
   getEventsForChat,
   getOpenPollsDuePastClose,
   getOpenPollsForChat,
   getPoll,
-  getPublishedDates,
+  getRetryablePublishDates,
   getSession,
   insertEvent,
   insertPoll,
   recordPublishedPoll,
-  releasePublish,
   removeVote,
   setPollClosed,
   setPollQuorumState,
@@ -45,9 +46,10 @@ import {
 } from "./store.js";
 
 const APP_NAME = "sborum-bot";
-const APP_VERSION = "3.0.3";
+const APP_VERSION = "3.0.4";
 
 const SESSION_TTL_MS = 24 * 3_600_000;
+const PUBLISH_CLAIM_STALE_MS = 5 * 60_000;
 
 // `app` bundles the per-request dependencies (D1 binding + config) that flow
 // through every handler, replacing the module-level globals the VPS build used.
@@ -378,21 +380,29 @@ function promptFor(field, eventType) {
   return prompts[field];
 }
 
-// Build a wizard prompt that mentions the asked user. Telegram force-reply is
-// unreliable in groups (it does not auto-engage across clients, and `selective`
-// only targets @username mentions, not text_mention by id), so we do not rely
-// on it. Instead the bot reads the user's next plain message (see
-// handleSessionMessage) — which requires the bot's group privacy mode to be
-// OFF. The mention makes it clear whose turn it is and pings them.
-function mentionPrompt(user, body) {
+// Build a wizard prompt that mentions the asked user and requests a direct
+// reply, so Telegram delivers the answer even when group privacy mode is ON.
+// handleSessionMessage also accepts the user's next plain message when privacy
+// mode is OFF, covering clients that do not auto-engage ForceReply.
+export function mentionPrompt(user, body, { forceReply = true } = {}) {
   const name = (user?.first_name || "Участник").trim() || "Участник";
 
   return {
-    text: `${name}, ${body}`,
+    text: forceReply
+      ? `${name}, ${body}\n\nОтветь на это сообщение.`
+      : `${name}, ${body}`,
     extra: {
       entities: [
         { type: "text_mention", offset: 0, length: name.length, user: { id: user.id } },
       ],
+      ...(forceReply
+        ? {
+            reply_markup: {
+              force_reply: true,
+              input_field_placeholder: "Ответь на это сообщение",
+            },
+          }
+        : {}),
     },
   };
 }
@@ -405,6 +415,7 @@ async function ask(app, session, field, chatId, threadId, user) {
   const { text, extra } = mentionPrompt(
     user,
     isCreateTimezone ? "Выбери часовой пояс:" : promptFor(field, session.eventType),
+    { forceReply: !isCreateTimezone },
   );
 
   const replyMarkup = isCreateTimezone
@@ -643,7 +654,7 @@ async function handleSessionMessage(app, message) {
 async function publishPoll(
   app,
   event,
-  { manual = false, eventDate = null } = {},
+  { manual = false, eventDate = null, now = new Date() } = {},
 ) {
   const selectedDate = eventDate || nextEventDate(event);
 
@@ -653,14 +664,20 @@ async function publishPoll(
     );
   }
 
-  const createdAt = new Date().toISOString();
+  const createdAt = now.toISOString();
 
   // Scheduled publishes reserve the (event, date) slot before any Telegram
   // call. A second overlapping or double-delivered cron tick fails to claim
   // and returns without posting a duplicate poll.
   if (
     !manual &&
-    !(await claimPublish(app.db, event.id, selectedDate, createdAt))
+    !(await claimPublish(
+      app.db,
+      event.id,
+      selectedDate,
+      createdAt,
+      new Date(now.getTime() - PUBLISH_CLAIM_STALE_MS).toISOString(),
+    ))
   ) {
     return;
   }
@@ -670,7 +687,7 @@ async function publishPoll(
 
   try {
     const relativeDate = formatRelativeDateRu({
-      fromDate: getToday(event),
+      fromDate: getToday(event, now),
       eventDate: selectedDate,
     });
 
@@ -710,10 +727,8 @@ async function publishPoll(
       ...topicPayload(event.messageThreadId),
     });
   } catch (error) {
-    // The poll was not posted — release the claim so a later tick can retry.
-    if (!manual) {
-      await releasePublish(app.db, event.id, selectedDate);
-    }
+    // Keep the claim: a Telegram error may follow a successful send, so only
+    // the one stale retry may post another poll.
     throw error;
   }
 
@@ -726,9 +741,7 @@ async function publishPoll(
     messageThreadId: event.messageThreadId,
     eventDate: selectedDate,
     createdAt,
-    closeAt: new Date(
-      Date.now() + event.pollDurationHours * 3_600_000,
-    ).toISOString(),
+    closeAt: new Date(now.getTime() + event.pollDurationHours * 3_600_000).toISOString(),
     closed: false,
     closedAt: null,
     quorumState: "below",
@@ -736,8 +749,7 @@ async function publishPoll(
     manual,
   };
 
-  // The poll is already live; record it without releasing the claim on a write
-  // error, so a retry can never post a duplicate of an already-posted poll.
+  // Keep the claim on a persistence error so any retry remains bounded.
   if (manual) {
     await insertPoll(app.db, pollRecord);
   } else {
@@ -1351,12 +1363,13 @@ async function handleMessage(app, message) {
   }
 }
 
-async function schedulerTick(app) {
+export async function schedulerTick(app, now = new Date()) {
   for (const event of await getActiveEvents(app.db)) {
     try {
-      const local = getLocalParts(new Date(), event.timezone);
+      const local = getLocalParts(now, event.timezone);
       const today = dateKey(local);
       const publishTime = parseTime(event.publishTime);
+      const staleBefore = new Date(now.getTime() - PUBLISH_CLAIM_STALE_MS).toISOString();
 
       const eventDate = getScheduledEventDate({
         eventType: event.type,
@@ -1368,18 +1381,26 @@ async function schedulerTick(app) {
         eventStartDate: event.startDate,
         intervalDays: event.intervalDays,
         publishDaysBefore: event.publishDaysBefore,
-        alreadyPublishedEventDates: await getPublishedDates(app.db, event.id),
+        alreadyPublishedEventDates: await getBlockedPublishDates(app.db, event.id),
       });
 
       if (eventDate) {
-        await publishPoll(app, event, { eventDate });
+        await publishPoll(app, event, { eventDate, now });
+      }
+
+      for (const retryDate of await getRetryablePublishDates(
+        app.db, event.id, today, staleBefore,
+      )) {
+        if (retryDate !== eventDate && isPublishRetryDue(event, retryDate, now)) {
+          await publishPoll(app, event, { eventDate: retryDate, now });
+        }
       }
     } catch (error) {
       console.error(`scheduler event ${event.id}:`, error);
     }
   }
 
-  const nowIso = new Date().toISOString();
+  const nowIso = now.toISOString();
   for (const poll of await getOpenPollsDuePastClose(app.db, nowIso)) {
     try {
       await closePoll(app, poll);
@@ -1390,7 +1411,7 @@ async function schedulerTick(app) {
 
   await clearStaleSessions(
     app.db,
-    new Date(Date.now() - SESSION_TTL_MS).toISOString(),
+    new Date(now.getTime() - SESSION_TTL_MS).toISOString(),
   );
 }
 

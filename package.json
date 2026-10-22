@@ -1,6 +1,6 @@
 {
   "name": "sborum-bot",
-  "version": "3.0.3",
+  "version": "3.0.4",
   "private": true,
   "type": "module",
   "description": "Telegram bot for collecting quorum for one-time and recurring events.",

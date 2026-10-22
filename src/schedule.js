@@ -206,6 +206,26 @@ export function getScheduledEventDate({
     : eventDate;
 }
 
+export function isPublishRetryDue(event, eventDate, now) {
+  const local = getLocalParts(now, event.timezone);
+  const today = dateKey(local);
+  if (eventDate < today) return false;
+
+  const occurrence = getNextEventDate({
+    eventType: event.type,
+    eventStartDate: event.startDate,
+    intervalDays: event.intervalDays,
+    fromDate: eventDate,
+  });
+  if (occurrence !== eventDate) return false;
+
+  const publicationDate = addDays(eventDate, -event.publishDaysBefore);
+  if (today !== publicationDate) return today > publicationDate;
+
+  const publishTime = parseTime(event.publishTime);
+  return local.hour * 60 + local.minute >= publishTime.hour * 60 + publishTime.minute;
+}
+
 export function formatDateRu(date) {
   const [year, month, day] = String(date).split("-");
   return `${day}.${month}.${year.slice(2)}`;
