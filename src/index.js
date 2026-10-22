@@ -7,6 +7,7 @@ import {
   getLocalParts,
   getNextEventDate,
   getScheduledEventDate,
+  isPublishRetryDue,
   parseTime,
   pluralizeRu,
 } from "./schedule.js";
@@ -748,8 +749,7 @@ async function publishPoll(
     manual,
   };
 
-  // The poll is already live; record it without releasing the claim on a write
-  // error, so a retry can never post a duplicate of an already-posted poll.
+  // Keep the claim on a persistence error so any retry remains bounded.
   if (manual) {
     await insertPoll(app.db, pollRecord);
   } else {
@@ -1391,7 +1391,7 @@ export async function schedulerTick(app, now = new Date()) {
       for (const retryDate of await getRetryablePublishDates(
         app.db, event.id, today, staleBefore,
       )) {
-        if (retryDate !== eventDate) {
+        if (retryDate !== eventDate && isPublishRetryDue(event, retryDate, now)) {
           await publishPoll(app, event, { eventDate: retryDate, now });
         }
       }

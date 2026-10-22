@@ -2,7 +2,7 @@
 
 **created:** 04-06-26 12-02-37 UTC
 
-**updated:** 21-10-26 17-24-46 MSK
+**updated:** 22-10-26 08-10-14 MSK
 
 **version:** 3.0.4 fix: recover stale publish claims
 
@@ -14,6 +14,7 @@
 - Added regression tests for unfinished and stale claims.
 - Kept failed claims through the retry cap and recovered stale claims after the publication day.
 - Skipped exhausted claims in scheduler queries without treating them as published polls.
+- Revalidated stale retries against the current occurrence, publication date/time, and timezone after schedule edits.
 - Restored ForceReply for group wizard text steps while retaining plain-message handling.
 
 ## 2.1.0 — feat: add standalone one-time and recurring events

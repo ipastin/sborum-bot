@@ -6,6 +6,7 @@ import {
   formatRelativeDateRu,
   getNextEventDate,
   getScheduledEventDate,
+  isPublishRetryDue,
   parseDateInput,
 } from "../src/schedule.js";
 
@@ -131,4 +132,45 @@ test("a late tick publishes the recurring occurrence and dedups", () => {
     }),
     null,
   );
+});
+
+const retryEvent = {
+  type: EVENT_TYPES.RECURRING,
+  startDate: "2026-06-11",
+  intervalDays: 14,
+  publishDaysBefore: 1,
+  publishTime: "23:58",
+  timezone: "UTC",
+};
+const retryDate = "2026-06-25";
+const afterMidnight = new Date("2026-06-25T00:04:00.000Z");
+
+test("retry occurrence follows the current type and interval", () => {
+  assert.equal(isPublishRetryDue(retryEvent, retryDate, afterMidnight), true);
+  assert.equal(isPublishRetryDue({ ...retryEvent, type: EVENT_TYPES.ONE_TIME }, retryDate, afterMidnight), false);
+  assert.equal(isPublishRetryDue({ ...retryEvent, intervalDays: 10 }, retryDate, afterMidnight), false);
+  assert.equal(isPublishRetryDue({ ...retryEvent, intervalDays: 7 }, retryDate, afterMidnight), true);
+  assert.equal(isPublishRetryDue({ ...retryEvent, type: EVENT_TYPES.ONE_TIME, startDate: retryDate }, retryDate, afterMidnight), true);
+});
+
+test("retry waits for an edited publishTime on the publication day", () => {
+  const event = { ...retryEvent, publishTime: "12:00" };
+  const now = new Date("2026-06-24T12:06:00.000Z");
+  assert.equal(isPublishRetryDue(event, retryDate, now), true);
+  assert.equal(isPublishRetryDue({ ...event, publishTime: "13:00" }, retryDate, now), false);
+  assert.equal(isPublishRetryDue({ ...event, publishTime: "13:00" }, retryDate, new Date("2026-06-24T13:00:00.000Z")), true);
+});
+
+test("retry recalculates the publication date when publishDaysBefore changes", () => {
+  assert.equal(isPublishRetryDue({ ...retryEvent, publishDaysBefore: 0 }, retryDate, afterMidnight), false);
+  assert.equal(isPublishRetryDue({ ...retryEvent, publishDaysBefore: 2 }, retryDate, afterMidnight), true);
+  assert.equal(isPublishRetryDue(retryEvent, retryDate, new Date("2026-06-26T00:00:00.000Z")), false);
+});
+
+test("retry uses the edited timezone for both the local date and time", () => {
+  const event = { ...retryEvent, timezone: "America/New_York" };
+  assert.equal(isPublishRetryDue(retryEvent, retryDate, afterMidnight), true);
+  assert.equal(isPublishRetryDue(event, retryDate, afterMidnight), false);
+  assert.equal(isPublishRetryDue(event, retryDate, new Date("2026-06-25T03:58:00.000Z")), true);
+  assert.equal(isPublishRetryDue({ ...retryEvent, timezone: "Asia/Tokyo" }, retryDate, new Date("2026-06-25T15:00:00.000Z")), false);
 });

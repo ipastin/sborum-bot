@@ -2,12 +2,13 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { mentionPrompt, schedulerTick } from "../src/index.js";
 
-function createPublishDb(initialClaim = null) {
+function createPublishDb(initialClaim = null, eventOverrides = {}) {
   const state = { claim: initialClaim, claimWrites: 0 };
   const event = {
     id: "event-1", type: "one_time", chat_id: "42", title: "Встреча",
     start_date: "2026-06-25", publish_days_before: 1, publish_time: "23:58",
     poll_duration_hours: 1, quorum_count: 3, timezone: "UTC", active: 1,
+    ...eventOverrides,
   };
 
   return {
@@ -134,6 +135,41 @@ test("a stale claim is retried after the publication day at local midnight", asy
 
   assert.equal(result.pollSends, 1);
   assert.deepEqual(result.errors, []);
+  assert.equal(db.state.claim.attempt_count, 2);
+  assert.equal(db.state.claim.poll_id, "poll-1");
+});
+
+test("moving startDate preserves the stale claim without publishing the cancelled date", async () => {
+  const claim = {
+    event_id: "event-1", event_date: "2026-06-25", poll_id: null,
+    published_at: "2026-06-24T23:58:00.000Z", attempt_count: 1,
+  };
+  const db = createPublishDb({ ...claim }, { start_date: "2026-07-02" });
+  const result = await runPublishTicks(db, ["2026-06-25T00:04:00.000Z"]);
+
+  assert.equal(result.pollSends, 0);
+  assert.deepEqual(result.errors, []);
+  assert.equal(db.state.claimWrites, 0);
+  assert.deepEqual(db.state.claim, claim);
+});
+
+test("postponing publication preserves the claim until the new deadline, then deduplicates", async () => {
+  const claim = {
+    event_id: "event-1", event_date: "2026-06-25", poll_id: null,
+    published_at: "2026-06-24T23:58:00.000Z", attempt_count: 1,
+  };
+  const db = createPublishDb({ ...claim }, { publish_days_before: 0, publish_time: "12:00" });
+  const early = await runPublishTicks(db, ["2026-06-25T00:04:00.000Z"]);
+
+  assert.equal(early.pollSends, 0);
+  assert.deepEqual(early.errors, []);
+  assert.equal(db.state.claimWrites, 0);
+  assert.deepEqual(db.state.claim, claim);
+
+  const due = await runPublishTicks(db, ["2026-06-25T12:00:00.000Z", "2026-06-25T12:06:00.000Z"]);
+  assert.equal(due.pollSends, 1);
+  assert.deepEqual(due.errors, []);
+  assert.equal(db.state.claimWrites, 1);
   assert.equal(db.state.claim.attempt_count, 2);
   assert.equal(db.state.claim.poll_id, "poll-1");
 });
