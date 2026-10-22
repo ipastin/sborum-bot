@@ -39,14 +39,14 @@ import {
   recordPublishedPoll,
   removeVote,
   setPollClosed,
-  setPollQuorumState,
+  syncPollQuorumState,
   setSession,
   updateEventFields,
   upsertVote,
 } from "./store.js";
 
 const APP_NAME = "sborum-bot";
-const APP_VERSION = "3.0.4";
+const APP_VERSION = "3.0.5";
 
 const SESSION_TTL_MS = 24 * 3_600_000;
 const PUBLISH_CLAIM_STALE_MS = 5 * 60_000;
@@ -835,7 +835,6 @@ async function handlePollAnswer(app, answer) {
 
   if (selectedOptionId === undefined) {
     await removeVote(app.db, poll.pollId, userKey);
-    delete poll.selections[userKey];
   } else {
     const vote = {
       optionId: selectedOptionId,
@@ -849,35 +848,35 @@ async function handlePollAnswer(app, answer) {
     };
 
     await upsertVote(app.db, poll.pollId, userKey, vote);
-    poll.selections[userKey] = vote;
   }
 
-  const yes = yesCount(poll);
-  const nextQuorumState =
-    yes >= quorumCount ? "reached" : "below";
+  const transition = await syncPollQuorumState(app.db, poll.pollId, quorumCount);
 
-  if (nextQuorumState !== poll.quorumState) {
-    await setPollQuorumState(app.db, poll.pollId, nextQuorumState);
-
-    await send(
-      app,
-      poll.chatId,
-      nextQuorumState === "reached"
-        ? `✅ Кворум набран: подтвердили участие ${yes} ${pluralizeRu(
-            yes,
-            "человек",
-            "человека",
-            "человек",
-          )}.`
-        : `⚠️ Кворум снова не набран: подтвердили участие ${yes} из ${quorumCount}.`,
-      {
-        ...topicPayload(poll.messageThreadId),
-        reply_parameters: {
-          message_id: poll.messageId,
-          allow_sending_without_reply: true,
+  if (transition) {
+    const yes = transition.yes_count;
+    try {
+      await send(
+        app,
+        poll.chatId,
+        transition.quorum_state === "reached"
+          ? `✅ Кворум набран: подтвердили участие ${yes} ${pluralizeRu(
+              yes,
+              "человек",
+              "человека",
+              "человек",
+            )}.`
+          : `⚠️ Кворум снова не набран: подтвердили участие ${yes} из ${quorumCount}.`,
+        {
+          ...topicPayload(poll.messageThreadId),
+          reply_parameters: {
+            message_id: poll.messageId,
+            allow_sending_without_reply: true,
+          },
         },
-      },
-    );
+      );
+    } catch (error) {
+      console.error(`quorum notice ${poll.pollId}:`, error);
+    }
   }
 }
 
@@ -1452,11 +1451,20 @@ export default {
       return new Response("bad request", { status: 400 });
     }
 
-    ctx.waitUntil(
-      routeUpdate(app, update).catch((error) =>
-        console.error("update:", error),
-      ),
-    );
+    if (update.poll_answer) {
+      try {
+        await routeUpdate(app, update);
+      } catch (error) {
+        console.error("update:", error);
+        return new Response("retry", { status: 503 });
+      }
+    } else {
+      ctx.waitUntil(
+        routeUpdate(app, update).catch((error) =>
+          console.error("update:", error),
+        ),
+      );
+    }
 
     return new Response("ok", { status: 200 });
   },

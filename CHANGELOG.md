@@ -2,9 +2,19 @@
 
 **created:** 04-06-26 12-02-37 UTC
 
-**updated:** 22-10-26 08-10-14 MSK
+**updated:** 22-10-26 08-47-25 MSK
 
-**version:** 3.0.4 fix: recover stale publish claims
+**version:** 3.0.5 fix: preserve pending Telegram updates and quorum transitions
+
+## 3.0.5 — fix: preserve pending Telegram updates and quorum transitions
+
+- Keep pending Telegram updates when setting or deleting the webhook.
+- Limit webhook delivery to one connection so queued answer changes do not overlap.
+- Count votes and change quorum state atomically when poll answers overlap.
+- Acknowledge poll answers only after processing; return a retryable error on failure.
+- Keep processing queued answers when a quorum notification fails after the vote is stored.
+- Document explicit account/database checks, ForceReply, and best-effort quorum notifications.
+- Pause cron during production import and backlog draining; stop it before VPS rollback.
 
 ## 3.0.4 — fix: recover stale publish claims
 
